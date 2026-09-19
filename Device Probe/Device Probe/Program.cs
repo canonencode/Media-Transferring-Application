@@ -13,12 +13,12 @@ if (deviceId is null)
     return;
 }
 
-// DIAGNOSTIC (temporary): confirm exactly which device we're talking to.
+// Confirm which device we're talking to (useful when more than one phone has
+// been connected today - not just a debug leftover, kept intentionally).
 var nameBuffer0 = new ushort[260];
 uint nameLength0 = (uint)nameBuffer0.Length;
 deviceManager.GetDeviceFriendlyName(deviceId, ref nameBuffer0[0], ref nameLength0);
-Console.WriteLine($"[DIAG] Connecting to: {new string(Array.ConvertAll(nameBuffer0, c => (char)c)).TrimEnd('\0')}");
-Console.WriteLine($"[DIAG] Device ID: {deviceId}");
+Console.WriteLine($"Connecting to: {new string(Array.ConvertAll(nameBuffer0, c => (char)c)).TrimEnd('\0')}");
 
 // --- Step 2: open a real connection to the device ---
 IPortableDevice device = new PortableDeviceClass();
@@ -119,9 +119,21 @@ int totalFilesSeen = 0;
 int caughtBySignatureOnly = 0;
 int signatureChecksActuallyRun = 0;
 int skippedDueToErrors = 0;
-var failedObjectIds = new List<string>();
+// Each failed object is stored WITH its parent's name, not just its own ID -
+// needed so a retry can correctly re-run the Android/data,obb skip check if
+// the recovered object turns out to be a folder we recurse back into.
+var failedObjectIds = new List<(string ObjectId, string ParentName)>();
 int signatureCheckErrors = 0;
 var routineErrorSamples = new List<string>();
+
+// CODE REVIEW FIX: when the retry pass recovers a folder that failed
+// mid-enumeration, it re-walks that folder from scratch (WPD has no
+// "resume from here" concept) - without this, children already counted
+// before the original failure got counted and printed a second time.
+// Every object that reaches classification goes through this set first;
+// re-visits (only possible via a retry re-walk) become harmless no-ops
+// instead of duplicates.
+var countedObjectIds = new HashSet<string>();
 
 // --- Session health monitoring ---
 // A WPD session's stream-reading capability can silently break while property
@@ -138,7 +150,151 @@ bool signatureCheckingDisabled = false;
 
 Console.WriteLine("Connected to device. Scanning file tree...\n");
 
-PrintTree("DEVICE", parentName: "", depth: 0);
+// SAFETY NET: everything we've hit so far has failed *fast* (an error comes
+// back in milliseconds), never hung. But nothing guarantees that forever - a
+// truly wedged USB/driver state could block a call with no error and no
+// timeout of its own. Run the whole scan on a background thread and give up
+// after a generous ceiling instead of risking an indefinite freeze; a real
+// app with a UI can't just sit frozen with no way out. The threshold is
+// generous (30 min) so it only ever fires on an actual hang, not a merely
+// slow-but-progressing large scan (our slowest real run was ~15 min).
+// Safe to hand these COM objects to a Task.Run thread: both the console
+// app's main thread and .NET's thread-pool threads default to MTA (no
+// [STAThread] attribute here), and MTA-to-MTA COM access needs no marshaling.
+var scanTask = Task.Run(() =>
+{
+    PrintTree("DEVICE", parentName: "", depth: 0);
+    RunRetryPass();
+});
+
+const int overallScanTimeoutMs = 30 * 60 * 1000;
+bool scanFinishedInTime;
+try
+{
+    // CODE REVIEW FIX: Task.Wait(int) throws the task's own AggregateException
+    // immediately if it faults within the timeout window - it does NOT return
+    // true and let a fault be discovered afterwards. The old `if
+    // (scanTask.IsFaulted)` check below this could never run: reaching it
+    // required Wait() to return true, which only happens on RanToCompletion.
+    // Catching AggregateException here and unwrapping it is the only place
+    // that check could ever actually do anything.
+    scanFinishedInTime = scanTask.Wait(overallScanTimeoutMs);
+}
+catch (AggregateException ex)
+{
+    throw ex.InnerException ?? ex;
+}
+
+if (!scanFinishedInTime)
+{
+    Console.WriteLine($"\n[WARNING] The scan has not finished after {overallScanTimeoutMs / 60000} minutes " +
+        "and looks genuinely stuck (not just slow - every real scan so far has finished well within this). " +
+        "Exiting rather than freezing indefinitely. Results printed above are partial; " +
+        "unplug/replug the phone and try again.");
+
+    // CODE REVIEW FIX: exiting here used to skip the session-cleanup block
+    // below entirely, reproducing the exact "device left locked, every
+    // signature check on the NEXT run fails with 'device unreachable'" bug
+    // that cleanup exists to prevent - precisely because a timeout is when
+    // the session is most likely to already be unhealthy. The scan thread
+    // may still be blocked inside a live COM call using these same objects,
+    // so this is a best-effort attempt, not a guaranteed-safe one - wrapped
+    // in try/catch and itself time-boxed so a stuck cleanup can't turn one
+    // hang into two.
+    try
+    {
+        var cleanupTask = Task.Run(() =>
+        {
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(wantedProperties);
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(resources);
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(properties);
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(content);
+            device.Close();
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(device);
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(clientInfo);
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(deviceManager);
+        });
+        cleanupTask.Wait(5000);
+    }
+    catch
+    {
+        // Best-effort only - the hung call may still own these objects, so
+        // failure here is expected sometimes. Still better than never trying.
+    }
+    Environment.Exit(1);
+}
+
+void RunRetryPass()
+{
+// --- Post-scan retry pass ---
+// Must run here, BEFORE the session cleanup below - GetNameAndType/
+// DetectKindBySignature need `properties`/`resources` still alive.
+// (First attempt put this after cleanup by mistake: crashed immediately with
+// "COM object that has been separated from its underlying RCW cannot be
+// used" - a real, sharp reminder that release-order matters.)
+// The main walk is fully done now, so it's safe to retry the objects that
+// failed earlier - unlike retrying INSIDE the walk (which corrupted results,
+// see the note in CheckSignatureWithHealthMonitoring), there's no in-flight
+// enumerator state left to break. Only re-attempts the specific objects that
+// actually failed, not the whole tree. Folders that failed are re-confirmed
+// but their children aren't re-listed in this pass - full resumability is a
+// job for the SQLite-backed version, this is just cheap, safe recovery of
+// what we can get back right now.
+if (failedObjectIds.Count > 0)
+{
+    // Snapshot both the list and its count up front: retrying appends to the
+    // live failedObjectIds again on a repeat failure, so reading
+    // failedObjectIds.Count *after* the loop would double-count.
+    var idsToRetry = failedObjectIds.ToList();
+    int originalFailedCount = idsToRetry.Count;
+    Console.WriteLine($"\nRetrying {originalFailedCount} previously-failed object(s)...");
+    int recovered = 0;
+    foreach (var (objectId, parentName) in idsToRetry)
+    {
+        var (name, isContainer) = GetNameAndType(objectId, parentName);
+        if (name == "(unreadable)") continue; // still failing, leave it
+
+        recovered++;
+        if (isContainer)
+        {
+            // CODE REVIEW FIX: this used to recurse unconditionally, with no
+            // equivalent of PrintTree's own Android/data,obb guard - a
+            // recovered "data" or "obb" object would get fully walked,
+            // defeating the one thing `parentName` was stored for. Now uses
+            // the exact same shared check PrintTree uses.
+            if (ShouldSkipAsBlockedAndroidSubfolder(parentName, name))
+            {
+                Console.WriteLine($"  [DIR]  {name} (recovered, but blocked - Android/data or Android/obb)");
+                continue;
+            }
+
+            // Recovering a folder previously meant only confirming it exists -
+            // its contents were never (re-)listed, so a failure on an early,
+            // high-up folder (e.g. the whole internal storage root) could
+            // silently zero out an entire scan even though the retry reported
+            // it as "recovered". Walk back into it now that we know it's
+            // readable again - safe here since the main walk is fully
+            // finished, same reasoning as the rest of this retry pass.
+            // (countedObjectIds makes this re-walk idempotent even though it
+            // starts from scratch: any child already classified in the main
+            // pass before the original failure is skipped, not double-counted.)
+            Console.WriteLine($"  [DIR]  {name} (recovered, now walking its contents)");
+            PrintTree(objectId, name, depth: 1);
+        }
+        else
+        {
+            // CODE REVIEW FIX: this used to duplicate PrintTree's own
+            // classification block with two real divergences - it called
+            // DetectKindBySignature directly (bypassing the session-health
+            // circuit breaker) and never routed through the shared counted-
+            // object dedup. Both fixed by calling the same helper PrintTree
+            // uses, just with the "recovered" tag prefixes.
+            ClassifyAndReportFile(objectId, name, indent: "  ", mediaTag: "[RECOVERED-MEDIA]", docTag: "[RECOVERED-DOC]");
+        }
+    }
+    Console.WriteLine($"Recovered {recovered} of {originalFailedCount} previously-failed object(s) ({originalFailedCount - recovered} still unreadable).");
+}
+}
 
 // IMPORTANT: without this, the device's session (specifically the "Resources"
 // stream-reading channel used by DetectKindBySignature) can stay locked after
@@ -196,7 +352,7 @@ void PrintTree(string objectId, string parentName, int depth)
     catch (System.Runtime.InteropServices.COMException ex)
     {
         skippedDueToErrors++;
-        failedObjectIds.Add(objectId);
+        failedObjectIds.Add((objectId, parentName));
         if (routineErrorSamples.Count < 10)
         {
             routineErrorSamples.Add($"[EnumObjects] HResult=0x{ex.HResult:X8} {ex.Message}");
@@ -217,7 +373,7 @@ void PrintTree(string objectId, string parentName, int depth)
         catch (System.Runtime.InteropServices.COMException ex)
         {
             skippedDueToErrors++;
-            failedObjectIds.Add(objectId);
+            failedObjectIds.Add((objectId, parentName));
             if (routineErrorSamples.Count < 10)
             {
                 routineErrorSamples.Add($"[Next] HResult=0x{ex.HResult:X8} {ex.Message}");
@@ -226,56 +382,30 @@ void PrintTree(string objectId, string parentName, int depth)
         }
         if (fetched == 0) break;
 
-        var (name, isContainer) = GetNameAndType(childId);
-        string indent = new string(' ', depth * 2);
+        // CODE REVIEW FIX: a folder recovered by the retry pass gets re-walked
+        // via a fresh EnumObjects call (WPD has no "resume" concept), which
+        // would otherwise re-count and re-print every child already handled
+        // before the original mid-enumeration failure. Skipping known IDs
+        // before even fetching their properties also saves a round trip.
+        if (!countedObjectIds.Add(childId))
+        {
+            continue;
+        }
 
-        bool isBlockedAndroidSubfolder = parentName == "Android" &&
-            (string.Equals(name, "data", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(name, "obb", StringComparison.OrdinalIgnoreCase));
+        var (name, isContainer) = GetNameAndType(childId, parentName);
+        string indent = new string(' ', depth * 2);
 
         if (isContainer)
         {
             Console.WriteLine($"{indent}[DIR]  {name}");
-            if (!isBlockedAndroidSubfolder)
+            if (!ShouldSkipAsBlockedAndroidSubfolder(parentName, name))
             {
                 PrintTree(childId, name, depth + 1);
             }
         }
         else
         {
-            totalFilesSeen++;
-
-            // Fast path: trust the extension if it's already a known type - no
-            // need to touch the device's actual bytes for the common case.
-            string extension = Path.GetExtension(name);
-            bool isMedia = mediaExtensions.Contains(extension);
-            bool isDocument = documentExtensions.Contains(extension);
-
-            // Fallback path: the extension is unrecognized (missing, wrong, or an
-            // app-invented one) AND it isn't already something we know for certain
-            // is irrelevant. Read just the file's first few bytes and check them
-            // against known signatures - the only place we touch real file
-            // content during the scan, deliberately rare since it's a real
-            // device round trip, not just a metadata lookup.
-            bool isKnownNonMedia = knownAudioExtensions.Contains(extension) || knownNonMediaExtensions.Contains(extension);
-            if (!isMedia && !isDocument && !isKnownNonMedia)
-            {
-                signatureChecksActuallyRun++;
-                var kind = CheckSignatureWithHealthMonitoring(childId);
-                if (kind == FileKind.MediaFile) { isMedia = true; caughtBySignatureOnly++; }
-                else if (kind == FileKind.Document) { isDocument = true; caughtBySignatureOnly++; }
-            }
-
-            if (isMedia)
-            {
-                mediaFilesFound++;
-                Console.WriteLine($"{indent}[MEDIA] {name}");
-            }
-            else if (isDocument)
-            {
-                documentFilesFound++;
-                Console.WriteLine($"{indent}[DOC]   {name}");
-            }
+            ClassifyAndReportFile(childId, name, indent, mediaTag: "[MEDIA]", docTag: "[DOC]");
         }
     } while (fetched > 0);
     }
@@ -288,6 +418,70 @@ void PrintTree(string objectId, string parentName, int depth)
     }
 }
 
+// Android/data and Android/obb are blocked from external access by Android
+// itself since Android 11, and are where huge irrelevant per-app caches
+// live. Shared by PrintTree and RunRetryPass so a recovered object can't
+// bypass this the way it used to (the retry pass had no equivalent check).
+//
+// KNOWN LIMITATION: parentName here is objectId's real parent's name in the
+// common case (the value threaded through PrintTree's own recursion, and
+// through GetNameAndType's failure path). The one case it can be wrong: if
+// PrintTree's OWN EnumObjects/Next call fails while enumerating "data" or
+// "obb" itself (not a sibling), failedObjectIds stores that object's *own*
+// name in the ParentName slot instead of its true parent's name (see
+// PrintTree's catch blocks), so a retry on that specific object could miss
+// the block. Narrow in practice: Android/data and Android/obb are OS-blocked,
+// so GetNameAndType typically fails while first resolving them as a child
+// (correctly recorded) well before EnumObjects would ever get a chance to
+// fail on them directly.
+bool ShouldSkipAsBlockedAndroidSubfolder(string parentName, string name) =>
+    parentName == "Android" &&
+    (string.Equals(name, "data", StringComparison.OrdinalIgnoreCase) ||
+     string.Equals(name, "obb", StringComparison.OrdinalIgnoreCase));
+
+// Shared by PrintTree and RunRetryPass so classification logic (extension
+// check -> signature fallback -> count -> print) can't silently drift
+// between the two the way it did before this fix (the retry-pass's own copy
+// skipped the health-monitoring wrapper and had no de-duplication).
+void ClassifyAndReportFile(string objectId, string name, string indent, string mediaTag, string docTag)
+{
+    totalFilesSeen++;
+
+    // Fast path: trust the extension if it's already a known type - no
+    // need to touch the device's actual bytes for the common case.
+    string extension = Path.GetExtension(name);
+    bool isMedia = mediaExtensions.Contains(extension);
+    bool isDocument = documentExtensions.Contains(extension);
+
+    // Fallback path: the extension is unrecognized (missing, wrong, or an
+    // app-invented one) AND it isn't already something we know for certain
+    // is irrelevant. Read just the file's first few bytes and check them
+    // against known signatures - the only place we touch real file
+    // content during the scan, deliberately rare since it's a real
+    // device round trip, not just a metadata lookup. Always routed through
+    // the health-monitoring wrapper (never DetectKindBySignature directly),
+    // so a session that's broken during a retry pass trips the same
+    // circuit breaker the main walk relies on.
+    bool isKnownNonMedia = knownAudioExtensions.Contains(extension) || knownNonMediaExtensions.Contains(extension);
+    if (!isMedia && !isDocument && !isKnownNonMedia)
+    {
+        var kind = CheckSignatureWithHealthMonitoring(objectId);
+        if (kind == FileKind.MediaFile) { isMedia = true; caughtBySignatureOnly++; }
+        else if (kind == FileKind.Document) { isDocument = true; caughtBySignatureOnly++; }
+    }
+
+    if (isMedia)
+    {
+        mediaFilesFound++;
+        Console.WriteLine($"{indent}{mediaTag} {name}");
+    }
+    else if (isDocument)
+    {
+        documentFilesFound++;
+        Console.WriteLine($"{indent}{docTag} {name}");
+    }
+}
+
 // Wraps DetectKindBySignature with session-health monitoring: tracks the error
 // rate in rolling batches of 20 checks, and if it looks like the session
 // itself is broken (not just "these files aren't media"), tries reconnecting
@@ -296,6 +490,10 @@ void PrintTree(string objectId, string parentName, int depth)
 FileKind CheckSignatureWithHealthMonitoring(string objectId)
 {
     if (signatureCheckingDisabled) return FileKind.Unknown;
+
+    // Counted here, not at the call site - this only increments when we're
+    // actually about to touch the device, not for calls short-circuited above.
+    signatureChecksActuallyRun++;
 
     int errorsBefore = signatureCheckErrors;
     FileKind kind = DetectKindBySignature(objectId);
@@ -408,7 +606,7 @@ FileKind DetectKindBySignature(string objectId)
 // immediately here (fast, proven), and only retry as a SEPARATE pass at the
 // end against the much smaller list of objects that actually failed - so a
 // slow recovery attempt can never block the main scan's completion.
-(string name, bool isContainer) GetNameAndType(string objectId)
+(string name, bool isContainer) GetNameAndType(string objectId, string parentName)
 {
     IPortableDeviceValues? values = null;
     try
@@ -422,7 +620,7 @@ FileKind DetectKindBySignature(string objectId)
     catch (System.Runtime.InteropServices.COMException ex)
     {
         skippedDueToErrors++;
-        failedObjectIds.Add(objectId);
+        failedObjectIds.Add((objectId, parentName));
         // DIAGNOSTIC (temporary): we've never actually looked at what these
         // "routine" errors are - only the signature-check ones. Sample the
         // first few so we know what we're dealing with before trying to fix it.
