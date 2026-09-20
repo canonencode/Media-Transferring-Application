@@ -351,9 +351,34 @@ var watchdog = new Thread(() =>
             "responding mid-scan - this is a wedged MTP session, not a slow one. Abandoning the walk so the " +
             "partial results are reported rather than waiting indefinitely.");
 
+        // Flushed explicitly. Console output is buffered when redirected to a
+        // file, and a wedged scan produces nothing further to push the buffer
+        // out - so this warning sat invisible in memory for 22 minutes while
+        // the user watched a log that appeared to have simply stopped.
+        Console.Out.Flush();
+
         // Still worth calling: it can unblock a thread already stuck inside a
         // COM call, which the flag on its own cannot reach.
         try { device.Cancel(); } catch (System.Runtime.InteropServices.COMException) { }
+
+        // ESCALATION, and the reason this is not just a nicety: measured on a
+        // real wedge, the scan thread was blocked INSIDE a COM call at 0.00s
+        // CPU for 22 minutes. Cancel() did not unblock it, and the abort flag
+        // could not help either - the flag is checked between objects, and a
+        // thread stuck inside a call never gets back to the check. Nothing in
+        // process can recover that thread.
+        //
+        // So: give it a short grace period to unwind, and if it does not,
+        // leave. Waiting out the 30-minute overall timeout is not a safety
+        // net, it is a hang with a longer name.
+        if (!scanTask.Wait(20_000))
+        {
+            Console.WriteLine("[FATAL] The device is not responding and the scan thread cannot be recovered - " +
+                "it is blocked inside a driver call that ignored Cancel(). Exiting now rather than waiting. " +
+                "Unplug and replug the phone before scanning again.");
+            Console.Out.Flush();
+            Environment.FailFast("WPD scan thread unrecoverable: wedged inside a COM call, Cancel() ignored.");
+        }
         return;
     }
 }) { IsBackground = true, Name = "wpd-stall-watchdog" };
