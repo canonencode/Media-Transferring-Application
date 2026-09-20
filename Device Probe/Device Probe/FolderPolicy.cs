@@ -36,12 +36,27 @@ static class FolderPolicy
     /// </summary>
     public static bool ShouldSkip(string parentPath, string name, out string reason)
     {
+        reason = "";
+        if (parentPath is null || name is null) return false;
+
         // Android blocks external access to these itself from Android 11 on, so
         // this is not our choice so much as reporting the OS's. They are also
         // where the largest irrelevant per-app caches live.
-        if (parentPath.EndsWith("/Android", StringComparison.OrdinalIgnoreCase) &&
-            (string.Equals(name, "data", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(name, "obb", StringComparison.OrdinalIgnoreCase)))
+        //
+        // Anchored to the storage root, not merely to a path ENDING in
+        // "/Android". The looser rule matched a user's own album: for
+        // parentPath "/Phone/DCIM/Android" and name "data" it returned true,
+        // so a folder someone had named Android anywhere in their gallery
+        // silently lost everything beneath it, with nothing said about it. The
+        // real one is always exactly <storage>/Android, i.e. two segments deep.
+        // At most two segments: <storage>/Android normally, or /Android alone
+        // if a device ever exposes storage as the root. Three or more means it
+        // is somebody's own folder, not the OS one.
+        string[] segments = parentPath.Split(PathSeparators, StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length is 1 or 2 &&
+            segments[^1].Equals("Android", StringComparison.OrdinalIgnoreCase) &&
+            (name.Equals("data", StringComparison.OrdinalIgnoreCase) ||
+             name.Equals("obb", StringComparison.OrdinalIgnoreCase)))
         {
             reason = "blocked from external access by Android itself since Android 11";
             return true;
@@ -53,7 +68,13 @@ static class FolderPolicy
             return true;
         }
 
-        reason = "";
         return false;
     }
+
+    // Both separators, because the walk builds paths with '/' but nothing
+    // guarantees a device name or a future caller will not introduce '\'. The
+    // previous rule hard-coded the literal "/Android" and would have stopped
+    // firing entirely against backslash paths - failing open, which here means
+    // walking into a folder Android itself refuses to serve.
+    static readonly char[] PathSeparators = { '/', '\\' };
 }

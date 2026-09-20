@@ -43,6 +43,12 @@ sealed class SessionHealthMonitor
     /// </summary>
     public double? RecordResult(bool errored)
     {
+        // Once tripped, stay quiet. Reporting again would reprint the whole
+        // multi-line warning; today that is masked only because the caller
+        // happens to check CheckingDisabled first, which is the kind of
+        // coupling that breaks the moment someone adds a second caller.
+        if (CheckingDisabled) return null;
+
         _checksInBatch++;
         if (errored) _errorsInBatch++;
         if (_checksInBatch < BatchSize) return null;

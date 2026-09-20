@@ -1,4 +1,4 @@
-/// <summary>
+﻿/// <summary>
 /// Decides what a file is, from its name and - when the name is not enough -
 /// from the first bytes of its content.
 ///
@@ -67,7 +67,28 @@ static class FileClassifier
     /// </summary>
     public static FileKind? ClassifyByName(string name)
     {
-        string extension = Path.GetExtension(name);
+        // Android 11+ does NOT move a deleted photo into a .Trash folder; it
+        // renames it in place to ".trashed-<timestamp>-IMG_0001.jpg". Skipping
+        // the folder therefore never caught the modern mechanism, and deleted
+        // photos were turning up in results regardless. ".pending-" is the same
+        // scheme for a write still in progress - a half-written file nobody
+        // wants transferred.
+        string fileName = Path.GetFileName(name);
+        if (fileName.StartsWith(".trashed-", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith(".pending-", StringComparison.OrdinalIgnoreCase))
+        {
+            return FileKind.Unknown;
+        }
+
+        // Trailing dots and spaces are legal in a filename the device hands us
+        // but are not part of the extension. Without trimming, "photo.jpg "
+        // yields ".jpg " which matches nothing, so the file fell through to a
+        // content read costing roughly 118ms - or, once the breaker had
+        // tripped, went unclassified entirely.
+        // The NAME is trimmed, not the extension: Path.GetExtension("photo.jpg.")
+        // already returns "" because the final character is the dot, so there
+        // would be nothing left to trim.
+        string extension = Path.GetExtension(name.TrimEnd('.', ' '));
 
         if (MediaExtensions.Contains(extension)) return FileKind.MediaFile;
         if (DocumentExtensions.Contains(extension)) return FileKind.Document;
@@ -95,16 +116,79 @@ static class FileClassifier
         if (header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47) return FileKind.MediaFile;
         // GIF ("GIF8")
         if (header[0] == 0x47 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x38) return FileKind.MediaFile;
-        // BMP ("BM")
-        if (header[0] == 0x42 && header[1] == 0x4D) return FileKind.MediaFile;
-        // WEBP - only the leading "RIFF" is checked, which also matches WAV;
-        // audio extensions are excluded before we ever get here.
-        if (header[0] == 0x52 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x46) return FileKind.MediaFile;
-        // HEIC/MP4/MOV/3GP all share an "ftyp" box at offset 4.
-        if (header[4] == 0x66 && header[5] == 0x74 && header[6] == 0x79 && header[7] == 0x70) return FileKind.MediaFile;
+
+        // BMP ("BM" plus a plausible file size). The size check is not
+        // decoration: on two bytes alone, the text "BMW service log" was
+        // classified as a photo. A real BMP stores its total size little-endian
+        // at offset 2, which for anything we would want must be at least the
+        // 14-byte header, and the ASCII text that produces false hits lands far
+        // outside any sane range.
+        if (header[0] == 0x42 && header[1] == 0x4D)
+        {
+            uint declaredSize = (uint)(header[2] | (header[3] << 8) | (header[4] << 16) | (header[5] << 24));
+            // Both bounds matter. A lower bound alone still accepted "BMW
+            // service ", whose size field reads as roughly 1.7 GB: printable
+            // ASCII in the high byte forces the value above 0x20000000, while
+            // any real BMP is far below it.
+            if (declaredSize >= 14 && declaredSize < 0x20000000) return FileKind.MediaFile;
+        }
+
+        // RIFF container: the four bytes at offset 8 say WHICH format it is,
+        // and they were never read. "RIFF....WAVE" and "RIFF....AVI " were both
+        // being reported as photos. Only WEBP is media for our purposes - AVI
+        // arrives with its own extension, and WAVE is audio.
+        if (Matches(header, 0, "RIFF")) return Matches(header, 8, "WEBP") ? FileKind.MediaFile : FileKind.Unknown;
+
+        // ISO base media (HEIC/MP4/MOV/3GP): an "ftyp" box at offset 4. Bytes
+        // 0-3 are that box's length, which must be a sane, 4-aligned value -
+        // without checking it, the ASCII text "the ftype is" matched. Bytes
+        // 8-11 are the major brand, which is how audio-only MP4 files are
+        // rejected; they cannot be excluded by extension when they have none.
+        if (Matches(header, 4, "ftyp"))
+        {
+            uint boxLength = (uint)((header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3]);
+            bool plausibleBox = boxLength >= 8 && boxLength <= 1024 && boxLength % 4 == 0;
+            bool audioBrand = Matches(header, 8, "M4A ") || Matches(header, 8, "M4B ") || Matches(header, 8, "M4P ");
+            if (plausibleBox && !audioBrand) return FileKind.MediaFile;
+        }
+
+        // TIFF, and with it DNG - the RAW format Samsung and Pixel cameras
+        // write. Both are in the extension list but neither had a signature, so
+        // one with a damaged extension was invisible.
+        if (Matches(header, 0, "II") && header[2] == 0x2A && header[3] == 0x00) return FileKind.MediaFile;
+        if (Matches(header, 0, "MM") && header[2] == 0x00 && header[3] == 0x2A) return FileKind.MediaFile;
+
+        // Matroska/WebM (EBML header) - .mkv and .webm are both claimed by the
+        // extension list.
+        if (header[0] == 0x1A && header[1] == 0x45 && header[2] == 0xDF && header[3] == 0xA3) return FileKind.MediaFile;
+
+        // JPEG XL, both the raw codestream and the ISOBMFF-wrapped form.
+        if (header[0] == 0xFF && header[1] == 0x0A) return FileKind.MediaFile;
+        if (header[0] == 0x00 && header[1] == 0x00 && header[2] == 0x00 && header[3] == 0x0C &&
+            Matches(header, 4, "JXL ")) return FileKind.MediaFile;
+
+        // JPEG 2000.
+        if (header[0] == 0x00 && header[1] == 0x00 && header[2] == 0x00 && header[3] == 0x0C &&
+            Matches(header, 4, "jP  ")) return FileKind.MediaFile;
+
         // PDF ("%PDF-")
-        if (header[0] == 0x25 && header[1] == 0x50 && header[2] == 0x44 && header[3] == 0x46 && header[4] == 0x2D) return FileKind.Document;
+        if (Matches(header, 0, "%PDF-")) return FileKind.Document;
 
         return FileKind.Unknown;
+    }
+
+    /// <summary>
+    /// Compares bytes at an offset against ASCII, without allocating. Returns
+    /// false rather than throwing when the buffer is too short, so every caller
+    /// above stays safe regardless of what the device returned.
+    /// </summary>
+    static bool Matches(ReadOnlySpan<byte> header, int offset, string ascii)
+    {
+        if (offset + ascii.Length > header.Length) return false;
+        for (int i = 0; i < ascii.Length; i++)
+        {
+            if (header[offset + i] != (byte)ascii[i]) return false;
+        }
+        return true;
     }
 }

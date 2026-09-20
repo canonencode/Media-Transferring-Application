@@ -50,7 +50,8 @@ deviceManager.GetDeviceFriendlyName(deviceId, ref nameBuffer0[0], ref nameLength
 // not have. (This runs once per process - it is a correctness tidy-up, not a
 // performance fix, whatever it might look like.)
 int nameLength = (int)Math.Min(nameLength0, (uint)nameBuffer0.Length);
-Console.WriteLine($"Connecting to: {new string(Array.ConvertAll(nameBuffer0[..nameLength], c => (char)c)).TrimEnd('\0')}");
+string friendlyName = new string(Array.ConvertAll(nameBuffer0[..nameLength], c => (char)c)).TrimEnd('\0');
+Console.WriteLine($"Connecting to: {friendlyName}");
 
 // --- Step 2: open a real connection to the device ---
 IPortableDevice device = new PortableDeviceClass();
@@ -148,7 +149,7 @@ var dateModifiedKey = new _tagpropertykey
 };
 // WPD_DEVICE_TYPE, asked of the device object itself rather than of a file.
 // This is how we tell a phone in file-transfer mode from the same phone in
-// camera mode - see ReportConnectionMode for why that distinction matters.
+// camera mode - see IsCameraMode and ConsoleScanSink for why that matters.
 var deviceTypeKey = new _tagpropertykey
 {
     fmtid = new Guid(0x26D4979A, 0xE643, 0x4626, 0x9E, 0x2B, 0x73, 0x6D, 0xC0, 0xC9, 0x2F, 0xDC),
@@ -215,6 +216,7 @@ int sessionClosed = 0;
 // handed to Task.Run before the watchdog itself is built.
 long lastProgressTicks = DateTime.UtcNow.Ticks;
 bool stallDetected = false;
+bool scanFaulted = false;
 
 // SCAFFOLDING (remove once the timing question is closed): answers "where does
 // a scan's time actually go?"
@@ -238,7 +240,8 @@ int enumObjectsCalls = 0;
 int suppressedPropertyErrors = 0;
 
 
-ReportConnectionMode();
+bool cameraMode = IsCameraMode();
+sink.OnScanStarted(deviceId, friendlyName, cameraMode);
 
 Console.WriteLine("Connected to device. Scanning file tree...\n");
 
@@ -263,7 +266,7 @@ Console.CancelKeyPress += (_, _) => CloseSession();
 
 var scanTask = Task.Run(() =>
 {
-    PrintTree("DEVICE", parentPath: "", depth: 0);
+    PrintTree("DEVICE", parentPath: "");
     RunRetryPass();
 });
 
@@ -349,6 +352,7 @@ catch (AggregateException ex)
     // Report rather than rethrow: rethrowing here skipped the summary AND the
     // session cleanup, turning one bad scan into a device that the next run
     // also can't read properly.
+    scanFaulted = true;
     var inner = ex.InnerException ?? ex;
     Console.WriteLine($"\n[FATAL] The scan stopped early: {inner.GetType().Name}: {inner.Message}");
     Console.WriteLine("Partial results are printed above and summarised below.");
@@ -356,6 +360,18 @@ catch (AggregateException ex)
 finally
 {
     CloseSession();
+
+    // Told once, explicitly, whatever happened. Without this a sink has no way
+    // to distinguish a complete census from a scan the watchdog cut short -
+    // and a store that records a partial scan as complete will later conclude
+    // that everything it did not see has been deleted from the phone.
+    sink.OnScanFinished(new ScanOutcome(
+        Completed: scanTask.IsCompletedSuccessfully,
+        Stalled: stallDetected,
+        Faulted: scanFaulted,
+        CameraMode: cameraMode,
+        UndeterminedFiles: sink.UndeterminedFiles,
+        SubtreeLosses: sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext)));
 }
 
 void RunRetryPass()
@@ -434,7 +450,7 @@ if (failedObjects.Count > 0)
         {
             if (FolderPolicy.ShouldSkip(parentPath, name, out string skipReason))
             {
-                sink.OnFolderSkipped($"{parentPath}/{name}", skipReason);
+                sink.OnFolderSkipped($"{parentPath}/{name}", $"recovered, but skipped - {skipReason}");
                 continue;
             }
 
@@ -444,8 +460,16 @@ if (failedObjects.Count > 0)
             // cheerfully reported it as "recovered". Walk it properly - safe
             // here because the main walk has fully finished, so no enumerator
             // is still in flight on the stack.
-            sink.OnFolder(retried, pathIsParent ? $"{parentPath}/{name}" : path, recovered: true);
-            PrintTree(objectId, pathIsParent ? $"{parentPath}/{name}" : path, depth: 1);
+            // walkedContainerIds is consulted here too. Without it a folder
+            // that failed at the Enumerate stage was announced twice: once by
+            // the main walk, once again by this pass. Files were already
+            // deduped; folders were not.
+            string recoveredPath = pathIsParent ? $"{parentPath}/{name}" : path;
+            if (walkedContainerIds.Add(objectId))
+            {
+                sink.OnFolder(retried, recoveredPath, recovered: true);
+            }
+            PrintTree(objectId, recoveredPath);
             recoveredFolders++;
         }
         else
@@ -611,7 +635,7 @@ void CloseSession()
 // and in practice they're also where huge irrelevant per-app caches live.
 // We do NOT skip the rest of "Android" (e.g. Android/media), since some apps
 // still use it for real shareable media.
-void PrintTree(string objectId, string parentPath, int depth)
+void PrintTree(string objectId, string parentPath)
 {
     IEnumPortableDeviceObjectIDs? childIds = null;
     try
@@ -683,7 +707,7 @@ void PrintTree(string objectId, string parentPath, int depth)
                 }
 
                 sink.OnFolder(obj, $"{parentPath}/{name}", recovered: false);
-                PrintTree(childId, $"{parentPath}/{name}", depth + 1);
+                PrintTree(childId, $"{parentPath}/{name}");
             }
             else
             {
@@ -730,7 +754,7 @@ void PrintTree(string objectId, string parentPath, int depth)
 // videos were missing from it - and in a flattened "all your photos" view
 // there is no folder structure left to notice the absence against. A silently
 // incomplete answer is worse here than a loud failure.
-void ReportConnectionMode()
+bool IsCameraMode()
 {
     IPortableDeviceKeyCollection? deviceKeys = null;
     IPortableDeviceValues? deviceValues = null;
@@ -742,24 +766,14 @@ void ReportConnectionMode()
         deviceValues.GetUnsignedIntegerValue(ref deviceTypeKey, out uint deviceType);
 
         const uint WPD_DEVICE_TYPE_CAMERA = 1;
-        if (deviceType == WPD_DEVICE_TYPE_CAMERA)
-        {
-            Console.WriteLine("\n[WARNING] This device is connected in CAMERA (PTP) mode, which exposes still " +
-                "images only. Videos, documents and some image formats are hidden by the phone itself, so this " +
-                "scan cannot see them and will look complete while missing them.");
-            Console.WriteLine("To scan everything: on the phone, tap the USB notification and choose " +
-                "\"File transfer\" (also shown as MTP, Dosya aktarimi, or Android Auto), then run this again.\n");
-        }
-        else
-        {
-            Console.WriteLine($"Connection mode looks right (WPD device type {deviceType}, not camera/PTP).");
-        }
+        return deviceType == WPD_DEVICE_TYPE_CAMERA;
     }
     catch (System.Runtime.InteropServices.COMException)
     {
-        // Not every driver reports this property. Staying quiet is correct:
-        // inventing a warning we can't support would train the user to ignore
-        // the one case where it is real.
+        // Not every driver reports this property. Assuming "not a camera" is
+        // the honest default: inventing a warning we cannot support would
+        // train the user to ignore the one case where it is real.
+        return false;
     }
     finally
     {
@@ -799,7 +813,7 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
     if (health.CheckingDisabled)
     {
         health.RecordSkippedCheck();
-        return FileKind.Unknown;
+        return FileKind.Undetermined;
     }
 
     // Counted here, not at the call site, so it only counts checks that
@@ -809,7 +823,7 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
     int errorsBefore = signatureCheckErrors;
     FileKind kind = DetectKindBySignature(objectId);
 
-    if (kind != FileKind.Unknown) caughtBySignatureOnly++;
+    if (kind is FileKind.MediaFile or FileKind.Document) caughtBySignatureOnly++;
 
     double? trippedAt = health.RecordResult(errored: signatureCheckErrors > errorsBefore);
     if (trippedAt is double rate)
@@ -853,12 +867,20 @@ FileKind DetectKindBySignature(string objectId)
         while (filled < header.Length)
         {
             byte[] chunk = new byte[header.Length - filled];
+            // AllocHGlobal hands back UNINITIALISED memory and this slot is
+            // reused every iteration, so a driver that returns success without
+            // writing the count would leave whatever was there before. Zero it
+            // first, then clamp: a garbage value larger than the buffer made
+            // Buffer.BlockCopy throw, and a garbage small one silently
+            // corrupted the header we then classified on.
+            System.Runtime.InteropServices.Marshal.WriteInt32(bytesReadPtr, 0);
             timeInGetStream.Start();
             try { stream.Read(chunk, chunk.Length, bytesReadPtr); }
             finally { timeInGetStream.Stop(); }
 
             int got = System.Runtime.InteropServices.Marshal.ReadInt32(bytesReadPtr);
             if (got <= 0) break; // end of stream - the file is simply shorter than 12 bytes
+            if (got > chunk.Length) got = chunk.Length;
             Buffer.BlockCopy(chunk, 0, header, filled, got);
             filled += got;
         }
@@ -881,7 +903,18 @@ FileKind DetectKindBySignature(string objectId)
         // as ordinary device errors, feeding the circuit breaker a reason to
         // shut down that had nothing to do with the device.
         signatureCheckErrors++;
-        return FileKind.Unknown;
+        return FileKind.Undetermined;
+    }
+    catch (Exception ex)
+    {
+        // Narrowing the catch to COMException left everything else - a failed
+        // cast, an RCW that has been severed, an allocation failure - with no
+        // handler anywhere between here and Task.Run, so one bad object ended
+        // the entire walk. Report it and carry on; the file is simply
+        // unclassified, which is now a state we can express.
+        Console.WriteLine($"[WARNING] Signature check failed unexpectedly on one object: " +
+            $"{ex.GetType().Name}: {ex.Message}. Continuing.");
+        return FileKind.Undetermined;
     }
     finally
     {
@@ -1014,7 +1047,8 @@ record DeviceObject(
     string? PersistentId,
     string? ModifiedRaw);
 
-enum FileKind { Unknown, MediaFile, Document }
+// FileKind now lives in FileKind.cs - it is returned by FileClassifier, which
+// is pure, so the enum has to be compilable without this file's COM interop.
 
 // Which WPD call failed. The distinction is the whole point: Enumerate and
 // EnumerateNext lose a folder's contents (an unknown number of files, possibly

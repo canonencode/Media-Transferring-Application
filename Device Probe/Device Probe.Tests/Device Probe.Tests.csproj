@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Must match the main project, because the files below are compiled with
+         these settings there: ImplicitUsings supplies System.IO/System.Collections.Generic
+         to FileClassifier.cs, and Nullable is what makes `out string?` and
+         `FileKind?` mean what they mean. -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Device_Probe.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Deliberately NOT a <ProjectReference> to "Device Probe.csproj".
+       Two reasons, both load-bearing:
+
+       1. That project carries COMReference items for PortableDeviceApiLib /
+          PortableDeviceTypesLib, and the ResolveComReference MSBuild task does
+          not exist in the .NET Core MSBuild that `dotnet test` runs (MSB4803).
+          Referencing it would make the tests unrunnable from the CLI at all.
+
+       2. The three classes under test claim to be pure - no COM, no device, no
+          console. Compiling their sources on their own, into an assembly that
+          has never heard of WPD, is what turns that claim into something the
+          build checks on every run. If someone later reaches for a COM type
+          inside FileClassifier, this project stops compiling, which is exactly
+          the alarm we want.
+
+       The classes are `internal` and namespace-less, so compiling the sources
+       in here (rather than referencing them) also sidesteps needing
+       InternalsVisibleTo. -->
+  <ItemGroup>
+    <Compile Include="..\Device Probe\FileClassifier.cs" Link="Production\FileClassifier.cs" />
+    <Compile Include="..\Device Probe\FolderPolicy.cs" Link="Production\FolderPolicy.cs" />
+    <Compile Include="..\Device Probe\SessionHealthMonitor.cs" Link="Production\SessionHealthMonitor.cs" />
+    <Compile Include="..\Device Probe\FileKind.cs" Link="Production\FileKind.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>
