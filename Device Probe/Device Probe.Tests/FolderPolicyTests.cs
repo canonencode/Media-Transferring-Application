@@ -100,6 +100,23 @@ public class FolderPolicyTests
         Assert.False(Skip(@"\Phone\DCIM\Android", "data"));
     }
 
+    [Fact]
+    public void StickerFolders_AreSkipped_ButRealPhotoFoldersAreNot()
+    {
+        // The aim is what is worth backing up. On a real phone stickers
+        // outnumbered actual camera photos two to one in some folders, and
+        // WhatsApp names one of them "Backup Excluded Stickers" itself.
+        Assert.True(Skip("/Phone/WhatsApp/Media", "WhatsApp Stickers"));
+        Assert.True(Skip("/Phone/WhatsApp/Media", "WhatsApp Backup Excluded Stickers"));
+        Assert.True(Skip("/Phone/Telegram", "Telegram Stickers"));
+        Assert.True(Skip("/Phone/Pictures", "stickers"));
+
+        // Screenshots and received images stay - the owner asked for both.
+        Assert.False(Skip("/Phone/DCIM", "Screenshots"));
+        Assert.False(Skip("/Phone/WhatsApp/Media", "WhatsApp Images"));
+        Assert.False(Skip("/Phone/DCIM", "Camera"));
+    }
+
     // ---- Cache / derived-copy folders --------------------------------------
 
     [Theory]

@@ -376,6 +376,23 @@ var watchdog = new Thread(() =>
             Console.WriteLine("[FATAL] The device is not responding and the scan thread cannot be recovered - " +
                 "it is blocked inside a driver call that ignored Cancel(). Exiting now rather than waiting. " +
                 "Unplug and replug the phone before scanning again.");
+
+            // Report what WAS found before leaving. FailFast skips every
+            // finally, every handler and the whole summary, so without this
+            // the user sees a process that simply died - no counts, no verdict,
+            // no indication that 9,440 files had already been listed above.
+            // "Here is what I found and it is incomplete" is a far better
+            // answer than silence, and silence is exactly the failure this
+            // project exists to prevent.
+            sink.OnScanFinished(new ScanOutcome(
+                Completed: false,
+                Stalled: true,
+                Faulted: false,
+                CameraMode: cameraMode,
+                UndeterminedFiles: sink.UndeterminedFiles,
+                SubtreeLosses: sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext)));
+            Console.WriteLine($"Found before the device stopped answering: {sink.MediaFiles} media file(s) " +
+                $"and {sink.Documents} document(s) out of {sink.TotalFilesSeen} file(s) seen.");
             Console.Out.Flush();
             Environment.FailFast("WPD scan thread unrecoverable: wedged inside a COM call, Cancel() ignored.");
         }

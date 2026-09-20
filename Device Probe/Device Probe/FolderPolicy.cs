@@ -68,6 +68,22 @@ static class FolderPolicy
             return true;
         }
 
+        // Stickers are not memories. The goal is what is worth BACKING UP -
+        // photos and videos someone would mind losing - and on a real phone
+        // these were 523 files against 770 actual camera photos. WhatsApp
+        // labels one of these folders "Backup Excluded Stickers" itself, which
+        // is the app telling us outright.
+        //
+        // Matched by substring rather than by exact name so Telegram and
+        // others are covered too. Deliberately NOT matched on size: a
+        // compressed WhatsApp photo can be 60 KB, so a size threshold would
+        // discard real memories along with the stickers.
+        if (name.Contains("Sticker", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "stickers - not something anyone would miss if it were lost";
+            return true;
+        }
+
         return false;
     }
 
