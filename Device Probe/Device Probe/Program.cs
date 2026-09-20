@@ -53,6 +53,28 @@ int nameLength = (int)Math.Min(nameLength0, (uint)nameBuffer0.Length);
 string friendlyName = new string(Array.ConvertAll(nameBuffer0[..nameLength], c => (char)c)).TrimEnd('\0');
 Console.WriteLine($"Connecting to: {friendlyName}");
 
+// Printed because this string is the candidate key for the manifest's device
+// table, and the whole "have I already copied this file?" guarantee rests on
+// it being the same string for the same phone tomorrow. A WPD device id is a
+// PnP path; whether it stays stable across USB ports and reconnects is not
+// something the documentation settles, so it gets measured.
+Console.WriteLine($"Device id: {deviceId}");
+
+// The serial number is the identity that should key the manifest, not the WPD
+// device id above. That id is a PnP path whose middle section is a generated
+// instance string for a function without its own serial; it happened to match
+// across two USB ports on this machine, but "happened to" is not a guarantee
+// to hang "have I already copied this file?" on. Windows itself records the
+// real serial on the parent device, so the phone is publishing one - ask for
+// it directly rather than parsing it back out of a path.
+var serialKey = new _tagpropertykey
+{
+    fmtid = new Guid(0x26D4979A, 0xE643, 0x4626, 0x9E, 0x2B, 0x73, 0x6D, 0xC0, 0xC9, 0x2F, 0xDC),
+    pid = 9 // WPD_DEVICE_SERIAL_NUMBER
+};
+var modelKey = serialKey with { pid = 8 };        // WPD_DEVICE_MODEL
+var manufacturerKey = serialKey with { pid = 7 }; // WPD_DEVICE_MANUFACTURER
+
 // --- Step 2: open a real connection to the device ---
 IPortableDevice device = new PortableDeviceClass();
 IPortableDeviceValues clientInfo = (IPortableDeviceValues)new PortableDeviceTypesLib.PortableDeviceValuesClass();
@@ -239,6 +261,10 @@ int enumObjectsCalls = 0;
 // genuinely went wrong and deserves to be visible.
 int suppressedPropertyErrors = 0;
 
+
+string? serialNumber = ReadDeviceString(serialKey);
+Console.WriteLine($"Serial number: {serialNumber ?? "(not supplied)"}");
+Console.WriteLine($"Manufacturer/model: {ReadDeviceString(manufacturerKey) ?? "?"} / {ReadDeviceString(modelKey) ?? "?"}");
 
 bool cameraMode = IsCameraMode();
 sink.OnScanStarted(deviceId, friendlyName, cameraMode);
@@ -754,6 +780,28 @@ void PrintTree(string objectId, string parentPath)
 // videos were missing from it - and in a flattened "all your photos" view
 // there is no folder structure left to notice the absence against. A silently
 // incomplete answer is worse here than a loud failure.
+/// Reads a device-level string property, or null if the driver does not supply it.
+string? ReadDeviceString(_tagpropertykey key)
+{
+    IPortableDeviceKeyCollection? keys = null;
+    IPortableDeviceValues? values = null;
+    try
+    {
+        keys = (IPortableDeviceKeyCollection)new PortableDeviceTypesLib.PortableDeviceKeyCollectionClass();
+        keys.Add(ref key);
+        properties.GetValues("DEVICE", keys, out values);
+        values.GetStringValue(ref key, out string value);
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+    catch (System.Runtime.InteropServices.COMException) { return null; }
+    catch (InvalidCastException) { return null; }
+    finally
+    {
+        if (values is not null) System.Runtime.InteropServices.Marshal.ReleaseComObject(values);
+        if (keys is not null) System.Runtime.InteropServices.Marshal.ReleaseComObject(keys);
+    }
+}
+
 bool IsCameraMode()
 {
     IPortableDeviceKeyCollection? deviceKeys = null;
