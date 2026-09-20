@@ -178,102 +178,15 @@ var folderType = new Guid(0x27E2E392, 0xA111, 0x48E0, 0xAB, 0x0C, 0xE1, 0x77, 0x
 // something we need to step into to reach the real folders underneath.
 var functionalObjectType = new Guid(0x99ED0160, 0x17FF, 0x4C44, 0x9D, 0x98, 0x1D, 0x7A, 0x6F, 0x94, 0x19, 0x21);
 
-// Extensions we count as "media" - this is how we decide relevance, NOT folder
-// names. WhatsApp, Telegram, screenshot tools etc. all use their own non-standard
-// folder names, so trusting folder names would silently miss real photos/videos.
-// A file's own extension doesn't lie about what it is, wherever it happens to sit.
-var mediaExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-{
-    // Images: everyday phone/camera formats, plus DNG (Android/Pixel/Samsung RAW
-    // mode) and AVIF/TIFF. Deliberately left out: brand-specific DSLR RAW
-    // formats (.cr2, .nef, .arw, ...) - rare on a phone, can add later if needed.
-    ".jpg", ".jpeg", ".jfif", ".png", ".gif", ".webp", ".bmp",
-    ".heic", ".heif", ".tiff", ".tif", ".dng", ".avif",
-    // Videos: MP4/MOV/3GP are what phones actually record; the rest cover
-    // videos that arrive from elsewhere (downloaded, shared, old camcorder clips).
-    ".mp4", ".mov", ".m4v", ".3gp", ".3g2",
-    ".avi", ".mkv", ".webm", ".flv", ".wmv", ".mpg", ".mpeg", ".m2ts", ".mts", ".ts"
-};
-
-// Known audio formats that share MP4-family "ftyp" container bytes with real
-// video/photo formats - excluded up front so the signature fallback never has
-// to guess at them (see the note in LooksLikeMediaBySignature).
-var knownAudioExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-{
-    ".m4a", ".m4b", ".m4p", ".mp3", ".aac", ".wav", ".ogg", ".opus", ".amr", ".flac"
-};
-
-// Extensions we're already CERTAIN aren't photos/videos - built from what actually
-// showed up as false candidates during real-device testing (.pag = CamScanner's own
-// document cache format, .nomedia = Android's literal "don't index this" marker
-// file, .crypt14 = WhatsApp's encrypted backups) plus common non-media types.
-// This is the fix for the scaling problem: every file listed here skips the
-// expensive signature check entirely, so that check only ever runs on files whose
-// extension is GENUINELY unknown - which, on a real phone, is a small remainder,
-// not "everything we don't already recognize."
-var knownNonMediaExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-{
-    ".nomedia", ".crypt14", ".crypt12", ".pag", ".chck",
-    ".json", ".xml", ".txt",
-    ".db", ".db-wal", ".db-shm", ".log", ".dat", ".tmp", ".lock",
-    ".zip", ".apk", ".bak", ".cfg", ".ini", ".key", ".properties", ".ttf"
-};
-
-// Documents - a second "wanted" category alongside photos/videos, tracked and
-// counted separately so we can see the breakdown.
-var documentExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-{
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"
-};
-
-// Folders holding only DERIVED copies of files we already scan elsewhere.
-// Measured on a real phone: .thumbnails alone held 7,955 of the 17,478 files a
-// scan classified as "media" - 46% of the result was miniatures of photos the
-// scan had already found, inflating the count and, far worse, using up the
-// device's stamina. MTP devices degrade under sustained request volume (every
-// error we see is from the documented "device is hung" family), and this phone
-// died before reaching DCIM - the one folder that actually holds the camera
-// roll. .Links is the same story: 108 usable files but roughly 3,000 objects,
-// and 2,990 of the scan's 3,012 errors came from inside it.
-//
-// Named explicitly rather than by the leading dot. Dot-prefixed only means
-// "hidden" on Android, and two of the hidden folders on this very phone -
-// .Statuses (WhatsApp statuses) and .Trash (the gallery's recycle bin) - can
-// hold real photos a user would want back.
-var skippableFolderNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-{
-    [".thumbnails"] = "cache folder - holds only derived copies of files scanned elsewhere",
-    [".Links"] = "cache folder - holds only derived copies of files scanned elsewhere",
-    [".wamocache"] = "cache folder - holds only derived copies of files scanned elsewhere",
-    // The gallery's recycle bin. Its contents are photos the user deliberately
-    // deleted, so surfacing them in a flattened "all your photos" view would
-    // read as a bug rather than a feature. One line to revisit if a "rescue
-    // deleted photos" feature is ever wanted.
-    [".Trash"] = "the gallery's recycle bin - these are photos the user deleted"
-};
-
-// Skipped folders are reported, never dropped silently - the user has to be
-// able to see what the scan chose not to look at.
-var skippedFolders = new List<string>();
-
-int mediaFilesFound = 0;
-int documentFilesFound = 0;
-int totalFilesSeen = 0;
 int caughtBySignatureOnly = 0;
 int signatureChecksActuallyRun = 0;
 int signatureCheckErrors = 0;
-// Files that reached the signature fallback AFTER the circuit breaker had
-// already disabled it. Each one is a file we genuinely did not classify - a
-// potential missed photo. Previously the summary said the feature had been
-// switched off but never said how much went unchecked because of it.
-int skippedBecauseSignatureDisabled = 0;
 
-// Every failure records WHICH call failed, not just that something did. The
-// old single counter conflated two very different losses: an EnumObjects/Next
-// failure drops an entire subtree, a GetValues failure drops one object. A
-// report of "1440 skipped" could therefore mean 1440 files or 40,000, and
-// there was no way to tell which - or where in the tree the hole was.
-var scanErrors = new List<ScanError>();
+// The walk no longer prints anything. It reports to a sink, which is what lets
+// the SQLite writer consume the same scan without the walk knowing it exists.
+var sink = new ConsoleScanSink();
+var health = new SessionHealthMonitor();
+
 
 // Failed objects get one retry after the main walk. The parent PATH is stored
 // rather than just the parent's name, so the retry can re-run the
@@ -324,37 +237,6 @@ int enumObjectsCalls = 0;
 // genuinely went wrong and deserves to be visible.
 int suppressedPropertyErrors = 0;
 
-// SCAFFOLDING (remove when the SQLite store lands): answers "which optional
-// properties does Android MTP actually populate?" - measured 100% for all of
-// them on the A56. Once every object is a row, this is a COUNT query, not a
-// set of hand-kept counters.
-// How often the device actually supplies each optional property. Published
-// research could not say which of these Android MTP populates reliably, so we
-// measure it here rather than design the SQLite schema around an assumption.
-int objectsWithOriginalFileName = 0;
-int objectsWithSize = 0;
-int objectsWithPersistentId = 0;
-int objectsWithDateModified = 0;
-int namesThatDisagree = 0;
-int objectsResolved = 0;
-// SCAFFOLDING (remove with the coverage counters).
-var fieldSamples = new List<DeviceObject>();
-// SCAFFOLDING (delete with identity-dump.txt once the persistent-id question
-// is settled): the only reason this list exists is to diff two runs.
-var identityLines = new List<string>();
-
-// --- Session health monitoring ---
-// A WPD session's stream-reading capability can silently break while property
-// queries keep working fine (confirmed by testing: 1606/1607 signature checks
-// failed with "device unreachable" after a prior run didn't close its session
-// cleanly). A scan can "complete successfully" while quietly missing every
-// file that needed the signature fallback, with nothing visibly wrong. We
-// watch the error rate in batches and react instead of trusting silence.
-const int healthCheckBatchSize = 20;
-const double healthCheckErrorThreshold = 0.75; // 75%+ errors in a batch = broken session, not "no matches"
-int checksInBatch = 0;
-int errorsInBatch = 0;
-bool signatureCheckingDisabled = false;
 
 ReportConnectionMode();
 
@@ -546,15 +428,13 @@ if (failedObjects.Count > 0)
             continue;
         }
 
-        objectsResolved++;
         string name = retried.Name;
 
         if (retried.IsContainer)
         {
-            if (ShouldSkipFolder(parentPath, name, out string skipReason))
+            if (FolderPolicy.ShouldSkip(parentPath, name, out string skipReason))
             {
-                Console.WriteLine($"  [SKIP] {name} (recovered, but skipped - {skipReason})");
-                skippedFolders.Add($"{parentPath}/{name} - {skipReason}");
+                sink.OnFolderSkipped($"{parentPath}/{name}", skipReason);
                 continue;
             }
 
@@ -564,13 +444,13 @@ if (failedObjects.Count > 0)
             // cheerfully reported it as "recovered". Walk it properly - safe
             // here because the main walk has fully finished, so no enumerator
             // is still in flight on the stack.
-            Console.WriteLine($"  [DIR]  {name} (recovered, now walking its contents)");
+            sink.OnFolder(retried, pathIsParent ? $"{parentPath}/{name}" : path, recovered: true);
             PrintTree(objectId, pathIsParent ? $"{parentPath}/{name}" : path, depth: 1);
             recoveredFolders++;
         }
         else
         {
-            ClassifyAndReportFile(retried, parentPath, indent: "  ", mediaTag: "[RECOVERED-MEDIA]", docTag: "[RECOVERED-DOC]");
+            ClassifyAndReportFile(retried, parentPath, recovered: true);
             recoveredFiles++;
         }
     }
@@ -593,17 +473,17 @@ if (failedObjects.Count > 0)
 }
 }
 
-Console.WriteLine($"\nDone. {mediaFilesFound} media file(s) and {documentFilesFound} document(s) found out of {totalFilesSeen} file(s) seen.");
+Console.WriteLine($"\nDone. {sink.MediaFiles} media file(s) and {sink.Documents} document(s) found out of {sink.TotalFilesSeen} file(s) seen.");
 Console.WriteLine($"({caughtBySignatureOnly} of those were caught only by file signature - their extension wasn't recognized.)");
-Console.WriteLine($"Expensive signature check actually ran on {signatureChecksActuallyRun} file(s) (out of {totalFilesSeen} total).");
+Console.WriteLine($"Expensive signature check actually ran on {signatureChecksActuallyRun} file(s) (out of {sink.TotalFilesSeen} total).");
 Console.WriteLine($"Signature check itself errored (not just 'no match') on {signatureCheckErrors} file(s).");
-if (skippedBecauseSignatureDisabled > 0)
+if (health.SkippedBecauseDisabled > 0)
 {
-    Console.WriteLine($"[IMPORTANT] {skippedBecauseSignatureDisabled} file(s) with an unrecognized extension went " +
+    Console.WriteLine($"[IMPORTANT] {health.SkippedBecauseDisabled} file(s) with an unrecognized extension went " +
         "UNCHECKED because the circuit breaker had already disabled signature checking. Any of them could be a " +
         "real photo or video that this scan did not count.");
 }
-Console.WriteLine(signatureCheckingDisabled
+Console.WriteLine(health.CheckingDisabled
     ? "Session health: signature checking was DISABLED partway through this scan (see warning above)."
     : "Session health: OK, signature checking ran normally for the whole scan.");
 
@@ -637,46 +517,10 @@ if (suppressedPropertyErrors > 0)
         "rather than missing data.");
 }
 
-// SCAFFOLDING (remove with the coverage counters above).
-// Which optional properties this device actually supplies. The SQLite manifest
-// is meant to key on size + modified date + a persistent id, so whether those
-// arrive is not a detail - it decides whether the "have I copied this already?"
-// guarantee can be built on them at all, or needs a content hash instead.
-if (objectsResolved > 0)
+if (sink.SkippedFolders.Count > 0)
 {
-    Console.WriteLine($"\nProperty coverage across {objectsResolved} resolved object(s):");
-    void Coverage(string label, int count) =>
-        Console.WriteLine($"  {count,7} / {objectsResolved}  ({(double)count / objectsResolved:P1})  {label}");
-
-    Coverage("WPD_OBJECT_ORIGINAL_FILE_NAME (real filename)", objectsWithOriginalFileName);
-    Coverage("WPD_OBJECT_SIZE", objectsWithSize);
-    Coverage("WPD_OBJECT_DATE_MODIFIED", objectsWithDateModified);
-    Coverage("WPD_OBJECT_PERSISTENT_UNIQUE_ID (identity across sessions)", objectsWithPersistentId);
-    Console.WriteLine($"  {namesThatDisagree,7} object(s) where the real filename differs from the display name.");
-
-    if (fieldSamples.Count > 0)
-    {
-        Console.WriteLine("\nSample of what the device returns per file:");
-        foreach (var sample in fieldSamples)
-        {
-            Console.WriteLine($"  name={sample.Name}");
-            Console.WriteLine($"    displayName={sample.DisplayName}");
-            Console.WriteLine($"    size={(sample.Size?.ToString() ?? "(not supplied)")}  " +
-                $"modified={(sample.ModifiedRaw ?? "(not supplied)")}");
-            Console.WriteLine($"    persistentId={(sample.PersistentId ?? "(not supplied)")}");
-            Console.WriteLine($"    objectId={sample.ObjectId}");
-        }
-    }
-}
-
-// SCAFFOLDING: goes away with identityLines.
-File.WriteAllLines("identity-dump.txt", identityLines);
-Console.WriteLine($"\n[DIAGNOSTIC] Wrote {identityLines.Count} identity line(s) to identity-dump.txt");
-
-if (skippedFolders.Count > 0)
-{
-    Console.WriteLine($"\n{skippedFolders.Count} folder(s) deliberately not walked:");
-    foreach (var skipped in skippedFolders)
+    Console.WriteLine($"\n{sink.SkippedFolders.Count} folder(s) deliberately not walked:");
+    foreach (var skipped in sink.SkippedFolders)
     {
         Console.WriteLine($"  {skipped}");
     }
@@ -687,10 +531,10 @@ if (skippedFolders.Count > 0)
 // failure loses a whole subtree while a Properties failure loses one object,
 // and one HResult repeated 1,400 times is a very different problem from five
 // different HResults - neither of which the old summary could express.
-if (scanErrors.Count > 0)
+if (sink.Errors.Count > 0)
 {
-    Console.WriteLine($"\n{scanErrors.Count} device error(s) during this scan, by call site and cause:");
-    foreach (var group in scanErrors
+    Console.WriteLine($"\n{sink.Errors.Count} device error(s) during this scan, by call site and cause:");
+    foreach (var group in sink.Errors
         .GroupBy(e => (e.Stage, e.HResult))
         .OrderByDescending(g => g.Count()))
     {
@@ -706,12 +550,12 @@ if (scanErrors.Count > 0)
         Console.WriteLine($"         e.g. \"{group.First().Message.Trim()}\" at {group.First().ParentPath}/");
     }
 
-    int subtreeLosses = scanErrors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext);
+    int subtreeLosses = sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext);
     if (subtreeLosses > 0)
     {
         Console.WriteLine($"\n[IMPORTANT] {subtreeLosses} of those errors happened while LISTING a folder, so an " +
             "unknown number of files below those points were never seen at all. Affected folders:");
-        foreach (var path in scanErrors
+        foreach (var path in sink.Errors
             .Where(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext)
             .Select(e => e.ParentPath)
             .Distinct()
@@ -779,7 +623,7 @@ void PrintTree(string objectId, string parentPath, int depth)
     }
     catch (System.Runtime.InteropServices.COMException ex)
     {
-        scanErrors.Add(new ScanError(objectId, parentPath, ScanStage.Enumerate, ex.HResult, ex.Message));
+        sink.OnError(new ScanError(objectId, parentPath, ScanStage.Enumerate, ex.HResult, ex.Message));
         failedObjects.Add((objectId, parentPath, ScanStage.Enumerate));
         return;
     }
@@ -801,7 +645,7 @@ void PrintTree(string objectId, string parentPath, int depth)
                 // one object - the enumerator can't be resumed from where it
                 // stopped. Recorded as its own stage so the summary can say so
                 // out loud instead of burying it in a generic skip count.
-                scanErrors.Add(new ScanError(objectId, parentPath, ScanStage.EnumerateNext, ex.HResult, ex.Message));
+                sink.OnError(new ScanError(objectId, parentPath, ScanStage.EnumerateNext, ex.HResult, ex.Message));
                 failedObjects.Add((objectId, parentPath, ScanStage.EnumerateNext));
                 break;
             }
@@ -822,11 +666,8 @@ void PrintTree(string objectId, string parentPath, int depth)
             var obj = GetObjectInfo(childId, parentPath);
             if (obj is null) continue; // recorded in failedObjects; the retry pass owns it now
 
-            objectsResolved++;
-            if (!obj.IsContainer && fieldSamples.Count < 5) fieldSamples.Add(obj);
 
             string name = obj.Name;
-            string indent = new string(' ', depth * 2);
 
             if (obj.IsContainer)
             {
@@ -835,19 +676,18 @@ void PrintTree(string objectId, string parentPath, int depth)
                 // enumerated twice.
                 if (!walkedContainerIds.Add(childId)) continue;
 
-                if (ShouldSkipFolder(parentPath, name, out string skipReason))
+                if (FolderPolicy.ShouldSkip(parentPath, name, out string skipReason))
                 {
-                    Console.WriteLine($"{indent}[SKIP] {name} ({skipReason})");
-                    skippedFolders.Add($"{parentPath}/{name} - {skipReason}");
+                    sink.OnFolderSkipped($"{parentPath}/{name}", skipReason);
                     continue;
                 }
 
-                Console.WriteLine($"{indent}[DIR]  {name}");
+                sink.OnFolder(obj, $"{parentPath}/{name}", recovered: false);
                 PrintTree(childId, $"{parentPath}/{name}", depth + 1);
             }
             else
             {
-                ClassifyAndReportFile(obj, parentPath, indent, mediaTag: "[MEDIA]", docTag: "[DOC]");
+                ClassifyAndReportFile(obj, parentPath, recovered: false);
             }
         } while (fetched > 0);
     }
@@ -928,100 +768,25 @@ void ReportConnectionMode()
     }
 }
 
-// The two reasons a folder is not worth walking, in one place so the main walk
-// and the retry pass can never disagree about them.
-//
-// Android/data and Android/obb are matched on the parent's PATH, not its bare
-// name. Matching the name alone meant any folder called "Android" anywhere in
-// the tree - a backup copy, a downloaded archive - silently lost its data/obb
-// children, and the parent comparison was case-sensitive while the child
-// comparison was not, for no reason.
-bool ShouldSkipFolder(string parentPath, string name, out string reason)
-{
-    if (parentPath.EndsWith("/Android", StringComparison.OrdinalIgnoreCase) &&
-        (string.Equals(name, "data", StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(name, "obb", StringComparison.OrdinalIgnoreCase)))
-    {
-        reason = "blocked from external access by Android itself since Android 11";
-        return true;
-    }
-
-    if (skippableFolderNames.TryGetValue(name, out string? knownReason))
-    {
-        reason = knownReason;
-        return true;
-    }
-
-    reason = "";
-    return false;
-}
-
 // Shared by PrintTree and RunRetryPass so classification logic (extension
 // check -> signature fallback -> count -> print) can't silently drift
 // between the two the way it did before this fix (the retry-pass's own copy
 // skipped the health-monitoring wrapper and had no de-duplication).
-void ClassifyAndReportFile(DeviceObject obj, string parentPath, string indent, string mediaTag, string docTag)
+void ClassifyAndReportFile(DeviceObject obj, string parentPath, bool recovered)
 {
-    string objectId = obj.ObjectId;
-    string name = obj.Name;
+    // The dedup guard lives HERE, at the one place a file is actually counted,
+    // rather than up in the walk. Both callers - the main walk and the retry
+    // pass - pass through it, which they did not before: the retry pass counted
+    // every object it recovered a second time.
+    if (!classifiedObjectIds.Add(obj.ObjectId)) return;
 
-    // The dedup guard lives HERE, at the one place a file actually gets
-    // counted, rather than up in the walk. Both callers - the main walk and
-    // the retry pass - now pass through it, which they did not before: the
-    // retry pass counted every object it recovered a second time.
-    if (!classifiedObjectIds.Add(objectId)) return;
+    // Fast path: the extension is recognised, so there is no reason to touch
+    // the file's actual bytes. Null means "unrecognised AND not already known
+    // to be irrelevant" - the only case worth a device round trip.
+    FileKind kind = FileClassifier.ClassifyByName(obj.Name)
+        ?? CheckSignatureWithHealthMonitoring(obj.ObjectId);
 
-    totalFilesSeen++;
-
-    // Fast path: trust the extension if it's already a known type - no
-    // need to touch the device's actual bytes for the common case.
-    string extension = Path.GetExtension(name);
-    bool isMedia = mediaExtensions.Contains(extension);
-    bool isDocument = documentExtensions.Contains(extension);
-
-    // Fallback path: the extension is unrecognized (missing, wrong, or an
-    // app-invented one) AND it isn't already something we know for certain
-    // is irrelevant. Read just the file's first few bytes and check them
-    // against known signatures - the only place we touch real file
-    // content during the scan, deliberately rare since it's a real
-    // device round trip, not just a metadata lookup. Always routed through
-    // the health-monitoring wrapper (never DetectKindBySignature directly),
-    // so a session that's broken during a retry pass trips the same
-    // circuit breaker the main walk relies on.
-    bool isKnownNonMedia = knownAudioExtensions.Contains(extension) || knownNonMediaExtensions.Contains(extension);
-    if (!isMedia && !isDocument && !isKnownNonMedia)
-    {
-        var kind = CheckSignatureWithHealthMonitoring(objectId);
-        if (kind == FileKind.MediaFile) { isMedia = true; caughtBySignatureOnly++; }
-        else if (kind == FileKind.Document) { isDocument = true; caughtBySignatureOnly++; }
-    }
-
-    if (isMedia)
-    {
-        mediaFilesFound++;
-        Console.WriteLine($"{indent}{mediaTag} {name}");
-    }
-    else if (isDocument)
-    {
-        documentFilesFound++;
-        Console.WriteLine($"{indent}{docTag} {name}");
-    }
-    else
-    {
-        return;
-    }
-
-    // TEMPORARY DIAGNOSTIC: one machine-readable identity line per kept file,
-    // so two runs separated by an unplug/replug can be diffed. This answers the
-    // question the SQLite schema hinges on - does PERSISTENT_UNIQUE_ID actually
-    // survive a reconnect, or is it just the session's object handle wearing a
-    // GUID costume? Remove once that is settled.
-    identityLines.Add(string.Join("|",
-        $"{parentPath}/{name}",
-        obj.PersistentId ?? "-",
-        obj.Size?.ToString() ?? "-",
-        obj.ModifiedRaw ?? "-",
-        obj.ObjectId));
+    sink.OnFile(obj, $"{parentPath}/{obj.Name}", kind, recovered);
 }
 
 // Wraps DetectKindBySignature with session-health monitoring: tracks the error
@@ -1031,53 +796,29 @@ void ClassifyAndReportFile(DeviceObject obj, string parentPath, string indent, s
 // rest of the scan.
 FileKind CheckSignatureWithHealthMonitoring(string objectId)
 {
-    if (signatureCheckingDisabled)
+    if (health.CheckingDisabled)
     {
-        // Counted, because each of these is a file we did not classify and
-        // could not classify - a potential missed photo. The summary used to
-        // report only that the feature had switched off, never how much slipped
-        // past because of it.
-        skippedBecauseSignatureDisabled++;
+        health.RecordSkippedCheck();
         return FileKind.Unknown;
     }
 
-    // Counted here, not at the call site - this only increments when we're
-    // actually about to touch the device, not for calls short-circuited above.
+    // Counted here, not at the call site, so it only counts checks that
+    // actually touched the device rather than ones short-circuited above.
     signatureChecksActuallyRun++;
 
     int errorsBefore = signatureCheckErrors;
     FileKind kind = DetectKindBySignature(objectId);
-    bool errored = signatureCheckErrors > errorsBefore;
 
-    checksInBatch++;
-    if (errored) errorsInBatch++;
+    if (kind != FileKind.Unknown) caughtBySignatureOnly++;
 
-    if (checksInBatch >= healthCheckBatchSize)
+    double? trippedAt = health.RecordResult(errored: signatureCheckErrors > errorsBefore);
+    if (trippedAt is double rate)
     {
-        double errorRate = (double)errorsInBatch / checksInBatch;
-        if (errorRate >= healthCheckErrorThreshold)
-        {
-            // TRIED, DOESN'T WORK: reconnecting mid-scan (device.Close() +
-            // Open() + re-fetching content/properties/resources) seemed like
-            // the obvious fix, but testing showed it corrupts the walk instead
-            // of recovering it - PrintTree's recursion has folder enumerators
-            // (IEnumPortableDeviceObjectIDs) from the OLD session still "in
-            // flight" on the call stack above the point where we reconnect,
-            // and swapping the session out from under them broke enumeration
-            // for the rest of the tree (a run that should see ~19,000 files
-            // only saw ~17,500 after a mid-scan reconnect). A live reconnect
-            // is only safe between separate top-level scans, not inside one.
-            // So: stop trying to be clever mid-scan, just stop doing the
-            // (now known-unreliable) signature checks and say so clearly.
-            signatureCheckingDisabled = true;
-            Console.WriteLine($"\n[WARNING] Signature checks are failing at {errorRate:P0} - the device session's " +
-                "stream-reading capability looks broken, not just 'these files aren't media'. Disabling the " +
-                "signature fallback for the rest of THIS scan (extension-based detection is unaffected and " +
-                "continues normally). For full accuracy including unrecognized-extension files, unplug/replug " +
-                "the phone (or restart the 'Portable Device Enumerator Service' / WPDBusEnum) and run again.\n");
-        }
-        checksInBatch = 0;
-        errorsInBatch = 0;
+        Console.WriteLine($"\n[WARNING] Signature checks are failing at {rate:P0} - the device session's " +
+            "stream-reading capability looks broken, not just 'these files aren't media'. Disabling the " +
+            "signature fallback for the rest of THIS scan (extension-based detection is unaffected and " +
+            "continues normally). For full accuracy including unrecognized-extension files, unplug/replug " +
+            "the phone (or restart the 'Portable Device Enumerator Service' / WPDBusEnum) and run again.\n");
     }
 
     return kind;
@@ -1106,7 +847,7 @@ FileKind DetectKindBySignature(string objectId)
         // tail stays zero it matched no signature - so a real photo over a weak
         // cable became a silent "not media". Now we read until we have all 12
         // bytes or the stream genuinely ends.
-        byte[] header = new byte[12];
+        byte[] header = new byte[FileClassifier.SignatureBytes];
         bytesReadPtr = System.Runtime.InteropServices.Marshal.AllocHGlobal(sizeof(int));
         int filled = 0;
         while (filled < header.Length)
@@ -1126,28 +867,7 @@ FileKind DetectKindBySignature(string objectId)
         // one: a 4-byte file is a real answer, not a device failure.
         if (filled < header.Length) return FileKind.Unknown;
 
-        // JPEG
-        if (header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF) return FileKind.MediaFile;
-        // PNG
-        if (header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47) return FileKind.MediaFile;
-        // GIF ("GIF8")
-        if (header[0] == 0x47 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x38) return FileKind.MediaFile;
-        // BMP ("BM")
-        if (header[0] == 0x42 && header[1] == 0x4D) return FileKind.MediaFile;
-        // WEBP ("RIFF"....'WEBP' - we only check the "RIFF" part here for simplicity)
-        if (header[0] == 0x52 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x46) return FileKind.MediaFile;
-        // HEIC/MP4/MOV/3GP/M4A all share the same container: an "ftyp" box at byte
-        // offset 4. Tried distinguishing audio-only variants (M4A/M4B) by reading
-        // the "major brand" field right after it - in practice this isn't
-        // reliable, since different encoders put different brand strings there
-        // for the same audio-only content (confirmed by testing against a real
-        // file). Excluding known audio extensions before we even get here is the
-        // simpler, verified-correct fix.
-        if (header[4] == 0x66 && header[5] == 0x74 && header[6] == 0x79 && header[7] == 0x70) return FileKind.MediaFile;
-        // PDF ("%PDF-")
-        if (header[0] == 0x25 && header[1] == 0x50 && header[2] == 0x44 && header[3] == 0x46 && header[4] == 0x2D) return FileKind.Document;
-
-        return FileKind.Unknown;
+        return FileClassifier.ClassifyBySignature(header);
     }
     catch (System.Runtime.InteropServices.COMException)
     {
@@ -1250,12 +970,6 @@ DeviceObject? GetObjectInfo(string objectId, string parentPath)
         string? modified = TryReadString(values, ref dateModifiedKey);
         ulong? size = TryReadSize(values, ref sizeKey);
 
-        if (originalFileName is not null) objectsWithOriginalFileName++;
-        if (persistentId is not null) objectsWithPersistentId++;
-        if (modified is not null) objectsWithDateModified++;
-        if (size is not null) objectsWithSize++;
-        if (originalFileName is not null && originalFileName != displayName) namesThatDisagree++;
-
         return new DeviceObject(
             objectId,
             // The real filename when the device gives one, the display name
@@ -1269,7 +983,7 @@ DeviceObject? GetObjectInfo(string objectId, string parentPath)
     }
     catch (System.Runtime.InteropServices.COMException ex)
     {
-        scanErrors.Add(new ScanError(objectId, parentPath, ScanStage.Properties, ex.HResult, ex.Message));
+        sink.OnError(new ScanError(objectId, parentPath, ScanStage.Properties, ex.HResult, ex.Message));
         failedObjects.Add((objectId, parentPath, ScanStage.Properties));
         return null;
     }
