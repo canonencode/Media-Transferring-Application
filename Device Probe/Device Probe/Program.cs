@@ -43,7 +43,14 @@ if (deviceId is null)
 var nameBuffer0 = new ushort[260];
 uint nameLength0 = (uint)nameBuffer0.Length;
 deviceManager.GetDeviceFriendlyName(deviceId, ref nameBuffer0[0], ref nameLength0);
-Console.WriteLine($"Connecting to: {new string(Array.ConvertAll(nameBuffer0, c => (char)c)).TrimEnd('\0')}");
+
+// The API writes the real length back into nameLength0, so use it instead of
+// converting all 260 slots and trimming the nulls off afterwards. Same result,
+// but it stops depending on a trailing null that a buffer-filling name would
+// not have. (This runs once per process - it is a correctness tidy-up, not a
+// performance fix, whatever it might look like.)
+int nameLength = (int)Math.Min(nameLength0, (uint)nameBuffer0.Length);
+Console.WriteLine($"Connecting to: {new string(Array.ConvertAll(nameBuffer0[..nameLength], c => (char)c)).TrimEnd('\0')}");
 
 // --- Step 2: open a real connection to the device ---
 IPortableDevice device = new PortableDeviceClass();
@@ -113,16 +120,17 @@ var originalFileNameKey = new _tagpropertykey
 // stable across sessions, so it cannot be the identity key; PERSISTENT_UNIQUE_ID
 // is the property meant for that job.
 //
-// UNKNOWN, deliberately: whether asking for more keys costs anything is NOT
-// established, and an earlier version of this comment claimed it was. Three
-// runs over the same ~14,360 files with zero errors each took 58s (2 keys),
-// 4m46s (7 keys) and 17.7s (6 keys). Six keys beating two rules out any
-// simple per-key cost. The dominant factor is almost certainly Windows' MTP
-// driver cache - a scan immediately following another has also come in at 4.2s
-// - which means wall-clock comparisons between separate runs measure cache
-// state, not our request shape. Settling this needs controlled, repeated,
-// alternating runs from a known cache state. Until then, choose keys by what
-// the data is worth, not by a performance guess.
+// SETTLED, by measuring per-call cost inside the process with the cache in a
+// known state - back-to-back runs, 2 keys then 6: 0.17 ms vs 0.20 ms per
+// GetValues call, 18.0s vs 18.6s overall. Extra keys are effectively free.
+//
+// Getting here took four wrong answers, all from the same mistake: comparing
+// wall-clock between runs whose driver cache state differed. What actually
+// dominates is that state. The first scan after the phone is connected costs
+// ~20 ms per call; every scan after it costs ~0.2 ms - a hundredfold gap that
+// swamps every other variable we tried to tune. Since the scan a real user
+// experiences is always the cold one, the answer is not fewer properties but
+// not rescanning from scratch every time, which is what the SQLite index is for.
 var sizeKey = new _tagpropertykey
 {
     fmtid = new Guid(0xEF6B490D, 0x5CD8, 0x437A, 0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C),
@@ -286,9 +294,40 @@ var failedObjects = new List<(string ObjectId, string Path, ScanStage Stage)>();
 var classifiedObjectIds = new HashSet<string>();  // files already counted
 var walkedContainerIds = new HashSet<string>();   // folders already enumerated; also breaks cycles
 
-// Guards CloseSession(), which can now be reached from three places at once.
-bool sessionClosed = false;
+// Guards CloseSession(), which is reachable from three places at once. An int
+// rather than a bool because Interlocked has no bool overload.
+int sessionClosed = 0;
 
+// Watchdog state. Declared up here because the tree walk writes to it and is
+// handed to Task.Run before the watchdog itself is built.
+long lastProgressTicks = DateTime.UtcNow.Ticks;
+bool stallDetected = false;
+
+// SCAFFOLDING (remove once the timing question is closed): answers "where does
+// a scan's time actually go?"
+// Where the time actually goes. Added because three separate attempts to
+// explain this scan's duration by comparing wall-clock between runs all
+// reached different, confident, wrong conclusions - the runs differed in
+// driver cache state, not in what we asked for. Measuring inside the process
+// removes the guesswork: one run now says how much time went into property
+// reads versus folder listing versus content streams.
+var timeInGetValues = new System.Diagnostics.Stopwatch();
+var timeInEnumObjects = new System.Diagnostics.Stopwatch();
+var timeInGetStream = new System.Diagnostics.Stopwatch();
+int getValuesCalls = 0;
+int enumObjectsCalls = 0;
+
+// SCAFFOLDING (fold into the scan_errors table when SQLite lands).
+// A property the device refuses is NOT the same as a property it does not have,
+// and collapsing both into null hid real driver failures behind "no data".
+// Coverage on the A56 is 100%, so in practice any of these now means something
+// genuinely went wrong and deserves to be visible.
+int suppressedPropertyErrors = 0;
+
+// SCAFFOLDING (remove when the SQLite store lands): answers "which optional
+// properties does Android MTP actually populate?" - measured 100% for all of
+// them on the A56. Once every object is a row, this is a COUNT query, not a
+// set of hand-kept counters.
 // How often the device actually supplies each optional property. Published
 // research could not say which of these Android MTP populates reliably, so we
 // measure it here rather than design the SQLite schema around an assumption.
@@ -298,7 +337,10 @@ int objectsWithPersistentId = 0;
 int objectsWithDateModified = 0;
 int namesThatDisagree = 0;
 int objectsResolved = 0;
+// SCAFFOLDING (remove with the coverage counters).
 var fieldSamples = new List<DeviceObject>();
+// SCAFFOLDING (delete with identity-dump.txt once the persistent-id question
+// is settled): the only reason this list exists is to diff two runs.
 var identityLines = new List<string>();
 
 // --- Session health monitoring ---
@@ -342,6 +384,43 @@ var scanTask = Task.Run(() =>
     PrintTree("DEVICE", parentPath: "", depth: 0);
     RunRetryPass();
 });
+
+// STALL WATCHDOG.
+//
+// Measured, and it invalidates every timing theory that came before it: a run
+// that appeared to take 15.5 minutes used 4.9 seconds of CPU. The process was
+// not working slowly, it was blocked inside a single COM call, at 0.00s CPU
+// over a 20-second sample, waiting for a phone that had stopped answering
+// partway through and never started again - unplugging was the only cure.
+//
+// So scan duration is not a function of how much we ask for; it is a function
+// of when, if ever, the device wedges. That makes the whole-scan timeout the
+// wrong instrument: it cannot tell "still working, large library" apart from
+// "died twenty minutes ago", and nobody will sit through 30 minutes to find
+// out. What distinguishes the two is PROGRESS, so that is what to watch.
+//
+// device.Cancel() is documented as callable from another thread to abort
+// operations in flight - the blocked call then returns an error, our existing
+// per-object error handling records it, and the walk unwinds normally instead
+// of the process having to be killed.
+const int stallSeconds = 45;
+var watchdog = new Thread(() =>
+{
+    while (!scanTask.IsCompleted)
+    {
+        Thread.Sleep(2000);
+        long idleTicks = DateTime.UtcNow.Ticks - Interlocked.Read(ref lastProgressTicks);
+        if (TimeSpan.FromTicks(idleTicks).TotalSeconds < stallSeconds) continue;
+
+        stallDetected = true;
+        Console.WriteLine($"\n[WARNING] No progress for {stallSeconds} seconds. The device has stopped " +
+            "responding mid-scan - this is a wedged MTP session, not a slow one. Asking it to cancel so " +
+            "the partial results below are at least reported rather than waiting indefinitely.");
+        try { device.Cancel(); } catch (System.Runtime.InteropServices.COMException) { }
+        return;
+    }
+}) { IsBackground = true, Name = "wpd-stall-watchdog" };
+watchdog.Start();
 
 const int overallScanTimeoutMs = 30 * 60 * 1000;
 try
@@ -528,6 +607,37 @@ Console.WriteLine(signatureCheckingDisabled
     ? "Session health: signature checking was DISABLED partway through this scan (see warning above)."
     : "Session health: OK, signature checking ran normally for the whole scan.");
 
+// SCAFFOLDING (remove with the stopwatches above).
+// Where the scan's time actually went, measured inside the process rather than
+// inferred by comparing one run's wall clock against another's. This is the
+// only honest way to answer "are extra properties expensive?" - the runs we
+// were comparing differed in driver cache state, not in request shape.
+long totalMs = timeInGetValues.ElapsedMilliseconds + timeInEnumObjects.ElapsedMilliseconds
+    + timeInGetStream.ElapsedMilliseconds;
+if (stallDetected)
+{
+    Console.WriteLine($"\n[IMPORTANT] This scan was CUT SHORT: the device stopped responding and did not " +
+        "recover. Everything above is partial - an unknown number of files were never reached. Unplug and " +
+        "replug the phone, then scan again; the results of this run should not be treated as a complete " +
+        "picture of what is on the device.");
+}
+
+Console.WriteLine($"\nTime spent inside device calls ({totalMs:N0} ms total):");
+Console.WriteLine($"  {timeInGetValues.ElapsedMilliseconds,9:N0} ms  GetValues      ({getValuesCalls:N0} calls, " +
+    $"{(getValuesCalls > 0 ? timeInGetValues.Elapsed.TotalMilliseconds / getValuesCalls : 0):F2} ms each)");
+Console.WriteLine($"  {timeInEnumObjects.ElapsedMilliseconds,9:N0} ms  EnumObjects    ({enumObjectsCalls:N0} calls, " +
+    $"{(enumObjectsCalls > 0 ? timeInEnumObjects.Elapsed.TotalMilliseconds / enumObjectsCalls : 0):F2} ms each)");
+Console.WriteLine($"  {timeInGetStream.ElapsedMilliseconds,9:N0} ms  content streams ({signatureChecksActuallyRun:N0} signature checks)");
+Console.WriteLine("  (EnumObjects excludes the per-item Next() calls, which are part of the walk itself.)");
+
+if (suppressedPropertyErrors > 0)
+{
+    Console.WriteLine($"\n[NOTE] {suppressedPropertyErrors} optional property read(s) failed and were treated as " +
+        "\"not supplied\". Coverage is normally 100% on this device, so these are likely real driver errors " +
+        "rather than missing data.");
+}
+
+// SCAFFOLDING (remove with the coverage counters above).
 // Which optional properties this device actually supplies. The SQLite manifest
 // is meant to key on size + modified date + a persistent id, so whether those
 // arrive is not a detail - it decides whether the "have I copied this already?"
@@ -559,6 +669,7 @@ if (objectsResolved > 0)
     }
 }
 
+// SCAFFOLDING: goes away with identityLines.
 File.WriteAllLines("identity-dump.txt", identityLines);
 Console.WriteLine($"\n[DIAGNOSTIC] Wrote {identityLines.Count} identity line(s) to identity-dump.txt");
 
@@ -624,8 +735,13 @@ if (scanErrors.Count > 0)
 // from its underlying RCW cannot be used".
 void CloseSession()
 {
-    if (sessionClosed) return;
-    sessionClosed = true;
+    // Interlocked, not a plain bool: this is reachable from the scan's finally,
+    // from ProcessExit and from Ctrl+C, and "read the flag, then set it" leaves
+    // a window where two threads both see false and both start releasing. The
+    // second release of an already-released RCW throws, but the worse case is
+    // one thread inside device.Close() while another is freeing the objects it
+    // is using. Exchange makes exactly one caller the winner.
+    if (Interlocked.Exchange(ref sessionClosed, 1) == 1) return;
     try
     {
         System.Runtime.InteropServices.Marshal.ReleaseComObject(wantedProperties);
@@ -656,7 +772,10 @@ void PrintTree(string objectId, string parentPath, int depth)
     IEnumPortableDeviceObjectIDs? childIds = null;
     try
     {
-        content.EnumObjects(0, objectId, null, out childIds);
+        enumObjectsCalls++;
+        timeInEnumObjects.Start();
+        try { content.EnumObjects(0, objectId, null, out childIds); }
+        finally { timeInEnumObjects.Stop(); }
     }
     catch (System.Runtime.InteropServices.COMException ex)
     {
@@ -687,6 +806,13 @@ void PrintTree(string objectId, string parentPath, int depth)
                 break;
             }
             if (fetched == 0) break;
+
+            // One timestamp write per object tells the watchdog we are alive.
+            // Placed after Next() returns rather than after the object is fully
+            // handled, so a single very slow object cannot be mistaken for a
+            // dead device - progress means the device answered, not that we
+            // finished with it.
+            Interlocked.Exchange(ref lastProgressTicks, DateTime.UtcNow.Ticks);
 
             // Resolve the object BEFORE claiming its ID. The previous version
             // claimed the ID first, so an object whose property read then
@@ -968,22 +1094,37 @@ FileKind DetectKindBySignature(string objectId)
     IntPtr bytesReadPtr = IntPtr.Zero;
     try
     {
-        resources.GetStream(objectId, ref resourceDefaultKey, 0 /* STGM_READ */, ref optimalTransferSize, out wpdStream);
+        timeInGetStream.Start();
+        try { resources.GetStream(objectId, ref resourceDefaultKey, 0 /* STGM_READ */, ref optimalTransferSize, out wpdStream); }
+        finally { timeInGetStream.Stop(); }
+
         var stream = (System.Runtime.InteropServices.ComTypes.IStream)wpdStream;
 
+        // IStream::Read may legally return FEWER bytes than asked for and still
+        // report success. Passing IntPtr.Zero (discarding the count) made a
+        // short read indistinguishable from a full one, and since the untouched
+        // tail stays zero it matched no signature - so a real photo over a weak
+        // cable became a silent "not media". Now we read until we have all 12
+        // bytes or the stream genuinely ends.
         byte[] header = new byte[12];
-
-        // IStream::Read is allowed to return FEWER bytes than asked for and
-        // still report success, so passing IntPtr.Zero here (which discards
-        // the count) meant a short read looked identical to a full one. The
-        // untouched tail stays zero, which matches no signature, so the file
-        // was silently reported as "not media" rather than "couldn't tell".
         bytesReadPtr = System.Runtime.InteropServices.Marshal.AllocHGlobal(sizeof(int));
-        stream.Read(header, header.Length, bytesReadPtr);
-        if (System.Runtime.InteropServices.Marshal.ReadInt32(bytesReadPtr) < header.Length)
+        int filled = 0;
+        while (filled < header.Length)
         {
-            return FileKind.Unknown;
+            byte[] chunk = new byte[header.Length - filled];
+            timeInGetStream.Start();
+            try { stream.Read(chunk, chunk.Length, bytesReadPtr); }
+            finally { timeInGetStream.Stop(); }
+
+            int got = System.Runtime.InteropServices.Marshal.ReadInt32(bytesReadPtr);
+            if (got <= 0) break; // end of stream - the file is simply shorter than 12 bytes
+            Buffer.BlockCopy(chunk, 0, header, filled, got);
+            filled += got;
         }
+
+        // Too short to identify. Not an error, and deliberately not counted as
+        // one: a 4-byte file is a real answer, not a device failure.
+        if (filled < header.Length) return FileKind.Unknown;
 
         // JPEG
         if (header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF) return FileKind.MediaFile;
@@ -1071,8 +1212,8 @@ string? TryReadString(IPortableDeviceValues values, ref _tagpropertykey key)
         values.GetStringValue(ref key, out string value);
         return string.IsNullOrEmpty(value) ? null : value;
     }
-    catch (System.Runtime.InteropServices.COMException) { return null; }
-    catch (InvalidCastException) { return null; } // device stored it as another VARTYPE
+    catch (System.Runtime.InteropServices.COMException) { suppressedPropertyErrors++; return null; }
+    catch (InvalidCastException) { suppressedPropertyErrors++; return null; } // stored as another VARTYPE
 }
 
 ulong? TryReadSize(IPortableDeviceValues values, ref _tagpropertykey key)
@@ -1082,8 +1223,8 @@ ulong? TryReadSize(IPortableDeviceValues values, ref _tagpropertykey key)
         values.GetUnsignedLargeIntegerValue(ref key, out ulong value);
         return value;
     }
-    catch (System.Runtime.InteropServices.COMException) { return null; }
-    catch (InvalidCastException) { return null; }
+    catch (System.Runtime.InteropServices.COMException) { suppressedPropertyErrors++; return null; }
+    catch (InvalidCastException) { suppressedPropertyErrors++; return null; }
 }
 
 DeviceObject? GetObjectInfo(string objectId, string parentPath)
@@ -1091,7 +1232,10 @@ DeviceObject? GetObjectInfo(string objectId, string parentPath)
     IPortableDeviceValues? values = null;
     try
     {
-        properties.GetValues(objectId, wantedProperties, out values);
+        getValuesCalls++;
+        timeInGetValues.Start();
+        try { properties.GetValues(objectId, wantedProperties, out values); }
+        finally { timeInGetValues.Stop(); }
 
         // Only these two are required. GetValues reports per-property failures
         // inside the returned collection rather than failing the whole call, so
