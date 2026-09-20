@@ -11,6 +11,22 @@ Console.OutputEncoding = new UTF8Encoding(false);
 
 // --- Step 1: find the device (same as the previous milestone) ---
 IPortableDeviceManager deviceManager = new PortableDeviceManagerClass();
+
+// KNOWN LIMITATION: this asks for exactly one device and scans whichever the
+// driver returns first. If a phone and a camera are both plugged in, the user
+// is not told which one was chosen.
+//
+// The documented way to learn the device count is to call GetDevices with a
+// NULL array pointer. That is not expressible through this interop: tlbimp
+// emits `ref string`, which always passes the address of a valid slot, never
+// NULL - so the device reads it as "caller has room for 0 entries", returns
+// nothing and reports a count of zero. Tried it; it broke device detection
+// outright, which is how we know rather than assume.
+//
+// Doing this properly needs a hand-written [ComImport] declaration that
+// marshals the array as an IntPtr - the same piece of work as batching
+// IEnumPortableDeviceObjectIDs::Next. Both belong to the real device layer,
+// not to this probe, and choosing between devices is a UI concern anyway.
 string? deviceId = null;
 uint deviceCount = 1;
 deviceManager.GetDevices(ref deviceId, ref deviceCount);
@@ -32,6 +48,31 @@ Console.WriteLine($"Connecting to: {new string(Array.ConvertAll(nameBuffer0, c =
 // --- Step 2: open a real connection to the device ---
 IPortableDevice device = new PortableDeviceClass();
 IPortableDeviceValues clientInfo = (IPortableDeviceValues)new PortableDeviceTypesLib.PortableDeviceValuesClass();
+
+// This used to be an empty values collection, which is legal but leaves two
+// things to chance. WPD's docs say drivers use the client information to
+// optimise, and - the part that matters here - an unspecified desired access
+// makes Open() ask for read AND write, which takes a heavier lock on the
+// device than a read-only session needs. This app is read-only by design
+// (see the safety guardrails: it must never be able to damage a phone), so
+// saying GENERIC_READ out loud is both more honest and less intrusive.
+var clientNameKey = new _tagpropertykey
+{
+    fmtid = new Guid(0x204D9F0C, 0x2292, 0x4080, 0x9F, 0x42, 0x40, 0x66, 0x4E, 0x70, 0xF8, 0x59),
+    pid = 2 // WPD_CLIENT_NAME
+};
+var clientMajorKey = clientNameKey with { pid = 3 };          // WPD_CLIENT_MAJOR_VERSION
+var clientMinorKey = clientNameKey with { pid = 4 };          // WPD_CLIENT_MINOR_VERSION
+var clientRevisionKey = clientNameKey with { pid = 5 };       // WPD_CLIENT_REVISION
+var clientDesiredAccessKey = clientNameKey with { pid = 9 };  // WPD_CLIENT_DESIRED_ACCESS
+
+const uint GENERIC_READ = 0x80000000;
+clientInfo.SetStringValue(ref clientNameKey, "Media Transfer App - Device Probe");
+clientInfo.SetUnsignedIntegerValue(ref clientMajorKey, 1);
+clientInfo.SetUnsignedIntegerValue(ref clientMinorKey, 0);
+clientInfo.SetUnsignedIntegerValue(ref clientRevisionKey, 0);
+clientInfo.SetUnsignedIntegerValue(ref clientDesiredAccessKey, GENERIC_READ);
+
 device.Open(deviceId, clientInfo);
 
 device.Content(out IPortableDeviceContent content);
@@ -58,6 +99,45 @@ var contentTypeKey = new _tagpropertykey
     pid = 7 // WPD_OBJECT_CONTENT_TYPE
 };
 
+// WPD_OBJECT_NAME is documented as the DISPLAY name; the real filename lives in
+// WPD_OBJECT_ORIGINAL_FILE_NAME. They usually agree on Android, but "usually" is
+// not a basis for naming a file we write to the user's disk.
+var originalFileNameKey = new _tagpropertykey
+{
+    fmtid = new Guid(0xEF6B490D, 0x5CD8, 0x437A, 0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C),
+    pid = 12 // WPD_OBJECT_ORIGINAL_FILE_NAME
+};
+
+// What the SQLite manifest needs in order to answer "have I already copied
+// this file?" without re-reading the phone. WPD_OBJECT_ID is documented as NOT
+// stable across sessions, so it cannot be the identity key; PERSISTENT_UNIQUE_ID
+// is the property meant for that job.
+//
+// UNKNOWN, deliberately: whether asking for more keys costs anything is NOT
+// established, and an earlier version of this comment claimed it was. Three
+// runs over the same ~14,360 files with zero errors each took 58s (2 keys),
+// 4m46s (7 keys) and 17.7s (6 keys). Six keys beating two rules out any
+// simple per-key cost. The dominant factor is almost certainly Windows' MTP
+// driver cache - a scan immediately following another has also come in at 4.2s
+// - which means wall-clock comparisons between separate runs measure cache
+// state, not our request shape. Settling this needs controlled, repeated,
+// alternating runs from a known cache state. Until then, choose keys by what
+// the data is worth, not by a performance guess.
+var sizeKey = new _tagpropertykey
+{
+    fmtid = new Guid(0xEF6B490D, 0x5CD8, 0x437A, 0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C),
+    pid = 11 // WPD_OBJECT_SIZE
+};
+var persistentIdKey = new _tagpropertykey
+{
+    fmtid = new Guid(0xEF6B490D, 0x5CD8, 0x437A, 0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C),
+    pid = 5 // WPD_OBJECT_PERSISTENT_UNIQUE_ID
+};
+var dateModifiedKey = new _tagpropertykey
+{
+    fmtid = new Guid(0xEF6B490D, 0x5CD8, 0x437A, 0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C),
+    pid = 19 // WPD_OBJECT_DATE_MODIFIED
+};
 // WPD_DEVICE_TYPE, asked of the device object itself rather than of a file.
 // This is how we tell a phone in file-transfer mode from the same phone in
 // camera mode - see ReportConnectionMode for why that distinction matters.
@@ -75,6 +155,13 @@ var deviceTypeKey = new _tagpropertykey
 IPortableDeviceKeyCollection wantedProperties = (IPortableDeviceKeyCollection)new PortableDeviceTypesLib.PortableDeviceKeyCollectionClass();
 wantedProperties.Add(ref nameKey);
 wantedProperties.Add(ref contentTypeKey);
+wantedProperties.Add(ref originalFileNameKey);
+wantedProperties.Add(ref sizeKey);
+wantedProperties.Add(ref persistentIdKey);
+wantedProperties.Add(ref dateModifiedKey);
+// WPD_OBJECT_PARENT_ID is deliberately NOT requested: we walk the tree
+// ourselves, so every object's parent is already known. Asking the device for
+// something we can already answer is waste regardless of what it costs.
 
 // WPD_CONTENT_TYPE_FOLDER: a real folder (e.g. "DCIM", "Pictures").
 var folderType = new Guid(0x27E2E392, 0xA111, 0x48E0, 0xAB, 0x0C, 0xE1, 0x77, 0x05, 0xA0, 0x5F, 0x85);
@@ -201,6 +288,18 @@ var walkedContainerIds = new HashSet<string>();   // folders already enumerated;
 
 // Guards CloseSession(), which can now be reached from three places at once.
 bool sessionClosed = false;
+
+// How often the device actually supplies each optional property. Published
+// research could not say which of these Android MTP populates reliably, so we
+// measure it here rather than design the SQLite schema around an assumption.
+int objectsWithOriginalFileName = 0;
+int objectsWithSize = 0;
+int objectsWithPersistentId = 0;
+int objectsWithDateModified = 0;
+int namesThatDisagree = 0;
+int objectsResolved = 0;
+var fieldSamples = new List<DeviceObject>();
+var identityLines = new List<string>();
 
 // --- Session health monitoring ---
 // A WPD session's stream-reading capability can silently break while property
@@ -338,8 +437,8 @@ if (failedObjects.Count > 0)
             ? path
             : path[..Math.Max(0, path.LastIndexOf('/'))];
 
-        var (ok, name, isContainer) = GetNameAndType(objectId, parentPath);
-        if (!ok)
+        var retried = GetObjectInfo(objectId, parentPath);
+        if (retried is null)
         {
             stillUnreadable++;
 
@@ -368,7 +467,10 @@ if (failedObjects.Count > 0)
             continue;
         }
 
-        if (isContainer)
+        objectsResolved++;
+        string name = retried.Name;
+
+        if (retried.IsContainer)
         {
             if (ShouldSkipFolder(parentPath, name, out string skipReason))
             {
@@ -389,7 +491,7 @@ if (failedObjects.Count > 0)
         }
         else
         {
-            ClassifyAndReportFile(objectId, name, indent: "  ", mediaTag: "[RECOVERED-MEDIA]", docTag: "[RECOVERED-DOC]");
+            ClassifyAndReportFile(retried, parentPath, indent: "  ", mediaTag: "[RECOVERED-MEDIA]", docTag: "[RECOVERED-DOC]");
             recoveredFiles++;
         }
     }
@@ -425,6 +527,40 @@ if (skippedBecauseSignatureDisabled > 0)
 Console.WriteLine(signatureCheckingDisabled
     ? "Session health: signature checking was DISABLED partway through this scan (see warning above)."
     : "Session health: OK, signature checking ran normally for the whole scan.");
+
+// Which optional properties this device actually supplies. The SQLite manifest
+// is meant to key on size + modified date + a persistent id, so whether those
+// arrive is not a detail - it decides whether the "have I copied this already?"
+// guarantee can be built on them at all, or needs a content hash instead.
+if (objectsResolved > 0)
+{
+    Console.WriteLine($"\nProperty coverage across {objectsResolved} resolved object(s):");
+    void Coverage(string label, int count) =>
+        Console.WriteLine($"  {count,7} / {objectsResolved}  ({(double)count / objectsResolved:P1})  {label}");
+
+    Coverage("WPD_OBJECT_ORIGINAL_FILE_NAME (real filename)", objectsWithOriginalFileName);
+    Coverage("WPD_OBJECT_SIZE", objectsWithSize);
+    Coverage("WPD_OBJECT_DATE_MODIFIED", objectsWithDateModified);
+    Coverage("WPD_OBJECT_PERSISTENT_UNIQUE_ID (identity across sessions)", objectsWithPersistentId);
+    Console.WriteLine($"  {namesThatDisagree,7} object(s) where the real filename differs from the display name.");
+
+    if (fieldSamples.Count > 0)
+    {
+        Console.WriteLine("\nSample of what the device returns per file:");
+        foreach (var sample in fieldSamples)
+        {
+            Console.WriteLine($"  name={sample.Name}");
+            Console.WriteLine($"    displayName={sample.DisplayName}");
+            Console.WriteLine($"    size={(sample.Size?.ToString() ?? "(not supplied)")}  " +
+                $"modified={(sample.ModifiedRaw ?? "(not supplied)")}");
+            Console.WriteLine($"    persistentId={(sample.PersistentId ?? "(not supplied)")}");
+            Console.WriteLine($"    objectId={sample.ObjectId}");
+        }
+    }
+}
+
+File.WriteAllLines("identity-dump.txt", identityLines);
+Console.WriteLine($"\n[DIAGNOSTIC] Wrote {identityLines.Count} identity line(s) to identity-dump.txt");
 
 if (skippedFolders.Count > 0)
 {
@@ -557,12 +693,16 @@ void PrintTree(string objectId, string parentPath, int depth)
             // failed was permanently marked "already handled" while never
             // having been counted - and the retry pass, which classifies
             // directly, had no way to notice.
-            var (ok, name, isContainer) = GetNameAndType(childId, parentPath);
-            if (!ok) continue; // recorded in failedObjects; the retry pass owns it now
+            var obj = GetObjectInfo(childId, parentPath);
+            if (obj is null) continue; // recorded in failedObjects; the retry pass owns it now
 
+            objectsResolved++;
+            if (!obj.IsContainer && fieldSamples.Count < 5) fieldSamples.Add(obj);
+
+            string name = obj.Name;
             string indent = new string(' ', depth * 2);
 
-            if (isContainer)
+            if (obj.IsContainer)
             {
                 // Claiming folders in their own set also breaks any cycle the
                 // device might report, since a repeated folder is never
@@ -581,7 +721,7 @@ void PrintTree(string objectId, string parentPath, int depth)
             }
             else
             {
-                ClassifyAndReportFile(childId, name, indent, mediaTag: "[MEDIA]", docTag: "[DOC]");
+                ClassifyAndReportFile(obj, parentPath, indent, mediaTag: "[MEDIA]", docTag: "[DOC]");
             }
         } while (fetched > 0);
     }
@@ -694,8 +834,11 @@ bool ShouldSkipFolder(string parentPath, string name, out string reason)
 // check -> signature fallback -> count -> print) can't silently drift
 // between the two the way it did before this fix (the retry-pass's own copy
 // skipped the health-monitoring wrapper and had no de-duplication).
-void ClassifyAndReportFile(string objectId, string name, string indent, string mediaTag, string docTag)
+void ClassifyAndReportFile(DeviceObject obj, string parentPath, string indent, string mediaTag, string docTag)
 {
+    string objectId = obj.ObjectId;
+    string name = obj.Name;
+
     // The dedup guard lives HERE, at the one place a file actually gets
     // counted, rather than up in the walk. Both callers - the main walk and
     // the retry pass - now pass through it, which they did not before: the
@@ -737,6 +880,22 @@ void ClassifyAndReportFile(string objectId, string name, string indent, string m
         documentFilesFound++;
         Console.WriteLine($"{indent}{docTag} {name}");
     }
+    else
+    {
+        return;
+    }
+
+    // TEMPORARY DIAGNOSTIC: one machine-readable identity line per kept file,
+    // so two runs separated by an unplug/replug can be diffed. This answers the
+    // question the SQLite schema hinges on - does PERSISTENT_UNIQUE_ID actually
+    // survive a reconnect, or is it just the session's object handle wearing a
+    // GUID costume? Remove once that is settled.
+    identityLines.Add(string.Join("|",
+        $"{parentPath}/{name}",
+        obj.PersistentId ?? "-",
+        obj.Size?.ToString() ?? "-",
+        obj.ModifiedRaw ?? "-",
+        obj.ObjectId));
 }
 
 // Wraps DetectKindBySignature with session-health monitoring: tracks the error
@@ -902,22 +1061,73 @@ FileKind DetectKindBySignature(string objectId)
 // checking for the rest of the scan. A self-inflicted wound that silently cost
 // real photos: every unrecognized-extension file after that point went
 // unclassified. The placeholder was also a real filename a device could return.
-(bool ok, string name, bool isContainer) GetNameAndType(string objectId, string parentPath)
+// A property the device chose not to supply comes back as a COMException from
+// the individual getter, not from GetValues itself. Absence is data, not an
+// error, so it is never recorded in scanErrors.
+string? TryReadString(IPortableDeviceValues values, ref _tagpropertykey key)
+{
+    try
+    {
+        values.GetStringValue(ref key, out string value);
+        return string.IsNullOrEmpty(value) ? null : value;
+    }
+    catch (System.Runtime.InteropServices.COMException) { return null; }
+    catch (InvalidCastException) { return null; } // device stored it as another VARTYPE
+}
+
+ulong? TryReadSize(IPortableDeviceValues values, ref _tagpropertykey key)
+{
+    try
+    {
+        values.GetUnsignedLargeIntegerValue(ref key, out ulong value);
+        return value;
+    }
+    catch (System.Runtime.InteropServices.COMException) { return null; }
+    catch (InvalidCastException) { return null; }
+}
+
+DeviceObject? GetObjectInfo(string objectId, string parentPath)
 {
     IPortableDeviceValues? values = null;
     try
     {
         properties.GetValues(objectId, wantedProperties, out values);
-        values.GetStringValue(ref nameKey, out string name);
+
+        // Only these two are required. GetValues reports per-property failures
+        // inside the returned collection rather than failing the whole call, so
+        // each optional field is read separately and allowed to be absent -
+        // which is exactly what we want to measure.
+        values.GetStringValue(ref nameKey, out string displayName);
         values.GetGuidValue(ref contentTypeKey, out Guid contentType);
         bool isContainer = contentType == folderType || contentType == functionalObjectType;
-        return (true, name, isContainer);
+
+        string? originalFileName = TryReadString(values, ref originalFileNameKey);
+        string? persistentId = TryReadString(values, ref persistentIdKey);
+        string? modified = TryReadString(values, ref dateModifiedKey);
+        ulong? size = TryReadSize(values, ref sizeKey);
+
+        if (originalFileName is not null) objectsWithOriginalFileName++;
+        if (persistentId is not null) objectsWithPersistentId++;
+        if (modified is not null) objectsWithDateModified++;
+        if (size is not null) objectsWithSize++;
+        if (originalFileName is not null && originalFileName != displayName) namesThatDisagree++;
+
+        return new DeviceObject(
+            objectId,
+            // The real filename when the device gives one, the display name
+            // otherwise. This is the string a transferred file gets named with.
+            originalFileName ?? displayName,
+            displayName,
+            isContainer,
+            size,
+            persistentId,
+            modified);
     }
     catch (System.Runtime.InteropServices.COMException ex)
     {
         scanErrors.Add(new ScanError(objectId, parentPath, ScanStage.Properties, ex.HResult, ex.Message));
         failedObjects.Add((objectId, parentPath, ScanStage.Properties));
-        return (false, "", false);
+        return null;
     }
     finally
     {
@@ -931,6 +1141,20 @@ FileKind DetectKindBySignature(string objectId)
         }
     }
 }
+
+// One object as the device describes it. Only ObjectId, Name and IsContainer
+// are guaranteed; the rest are nullable because "the device did not tell us"
+// is a real and common answer, and pretending otherwise (0 for an unknown
+// size, DateTime.MinValue for an unknown date) would let missing data pass
+// silently into the manifest as though it were measured.
+record DeviceObject(
+    string ObjectId,
+    string Name,
+    string DisplayName,
+    bool IsContainer,
+    ulong? Size,
+    string? PersistentId,
+    string? ModifiedRaw);
 
 enum FileKind { Unknown, MediaFile, Document }
 
