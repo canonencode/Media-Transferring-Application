@@ -240,6 +240,10 @@ long lastProgressTicks = DateTime.UtcNow.Ticks;
 bool stallDetected = false;
 bool scanFaulted = false;
 
+// Set by the watchdog, read by the walk. An int because Volatile/Interlocked
+// have no bool overloads; 1 means "stop walking, the device is gone".
+int scanAborted = 0;
+
 // SCAFFOLDING (remove once the timing question is closed): answers "where does
 // a scan's time actually go?"
 // Where the time actually goes. Added because three separate attempts to
@@ -320,13 +324,35 @@ var watchdog = new Thread(() =>
     while (!scanTask.IsCompleted)
     {
         Thread.Sleep(2000);
+        // PROBE_FORCE_STALL exists because the abort path cannot otherwise be
+        // exercised without waiting for a phone to genuinely wedge, and that
+        // path is where the damage happens: a scan cut short must still report
+        // itself as partial rather than look complete. Setting it made the
+        // walk abort on a healthy device and proved the reporting end to end -
+        // and the first run of that test is what revealed Cancel() alone does
+        // not stop anything. Off unless deliberately set.
         long idleTicks = DateTime.UtcNow.Ticks - Interlocked.Read(ref lastProgressTicks);
-        if (TimeSpan.FromTicks(idleTicks).TotalSeconds < stallSeconds) continue;
+        bool forced = Environment.GetEnvironmentVariable("PROBE_FORCE_STALL") is not null;
+        if (!forced && TimeSpan.FromTicks(idleTicks).TotalSeconds < stallSeconds) continue;
 
+        // The flag comes FIRST, and it is what actually stops the walk.
+        //
+        // Cancel() alone does not, and a forced test proved it: the watchdog
+        // fired, Cancel() was called, and the scan carried on for another 4,838
+        // objects before wedging anyway, never reaching the summary. The reason
+        // is obvious in hindsight - Cancel() aborts operations IN FLIGHT, and
+        // this scan is not one long operation but ~14,500 tiny ones. Cancelling
+        // the current call just makes that one call fail; the loop moves to the
+        // next object. Something has to tell the LOOP to stop.
+        Volatile.Write(ref scanAborted, 1);
         stallDetected = true;
+
         Console.WriteLine($"\n[WARNING] No progress for {stallSeconds} seconds. The device has stopped " +
-            "responding mid-scan - this is a wedged MTP session, not a slow one. Asking it to cancel so " +
-            "the partial results below are at least reported rather than waiting indefinitely.");
+            "responding mid-scan - this is a wedged MTP session, not a slow one. Abandoning the walk so the " +
+            "partial results are reported rather than waiting indefinitely.");
+
+        // Still worth calling: it can unblock a thread already stuck inside a
+        // COM call, which the flag on its own cannot reach.
         try { device.Cancel(); } catch (System.Runtime.InteropServices.COMException) { }
         return;
     }
@@ -420,6 +446,13 @@ if (failedObjects.Count > 0)
 {
     // Snapshot the list up front: a repeat failure during the retry appends to
     // the live list again, so reading its count afterwards would double-count.
+    if (Volatile.Read(ref scanAborted) == 1)
+    {
+        Console.WriteLine($"\nSkipping the retry pass: the device stopped responding, so re-asking it for " +
+            $"{failedObjects.Count} object(s) would only wait for answers that are not coming.");
+        return;
+    }
+
     var toRetry = failedObjects.ToList();
     int originalFailedCount = toRetry.Count;
     Console.WriteLine($"\nRetrying {originalFailedCount} previously-failed object(s)...");
@@ -663,6 +696,8 @@ void CloseSession()
 // still use it for real shareable media.
 void PrintTree(string objectId, string parentPath)
 {
+    if (Volatile.Read(ref scanAborted) == 1) return;
+
     IEnumPortableDeviceObjectIDs? childIds = null;
     try
     {
@@ -700,6 +735,8 @@ void PrintTree(string objectId, string parentPath)
                 break;
             }
             if (fetched == 0) break;
+
+            if (Volatile.Read(ref scanAborted) == 1) break;
 
             // One timestamp write per object tells the watchdog we are alive.
             // Placed after Next() returns rather than after the object is fully
