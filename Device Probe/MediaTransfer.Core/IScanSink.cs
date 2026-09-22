@@ -9,11 +9,17 @@
 /// Paths are the full accumulated path ("/Dahili depolama/DCIM/Camera"), so a
 /// sink that wants indentation can derive it and one that wants rows does not
 /// have to care about depth at all.
+///
+/// Every figure a sink needs to render or store arrives through these calls or
+/// on <see cref="ScanOutcome"/>. That rule is what makes a second sink
+/// possible: an earlier version had the walk reading counters back off the
+/// console sink, which meant the console sink WAS the scan's memory and nothing
+/// else could be plugged in beside it.
 /// </summary>
 public interface IScanSink
 {
     /// <summary>Called once before the walk begins.</summary>
-    void OnScanStarted(string deviceId, string friendlyName, bool cameraMode);
+    void OnScanStarted(DeviceIdentity device, bool cameraMode);
 
     /// <summary>
     /// Called once when the walk ends, however it ends. Without this a sink
@@ -38,12 +44,25 @@ public interface IScanSink
     void OnFolderSkipped(string path, string reason);
 
     void OnError(ScanError error);
+
+    /// <summary>
+    /// The retry pass is about to re-read <paramref name="objectCount"/>
+    /// objects that failed during the main walk. Separate from
+    /// <see cref="OnRetryFinished"/> because anything the pass recovers is
+    /// reported through OnFile/OnFolder in between, and a sink that renders a
+    /// running log needs the header before those lines, not after them.
+    /// </summary>
+    void OnRetryStarted(int objectCount);
+
+    /// <summary>Called once per scan that had failures, whether or not the pass ran.</summary>
+    void OnRetryFinished(RetryOutcome outcome);
 }
 
 /// <summary>
-/// Whether a finished scan can be trusted as a complete picture of the device.
-/// Every field here is a reason it might not be, and each one has been observed
-/// on real hardware.
+/// Whether a finished scan can be trusted as a complete picture of the device,
+/// and the census it produced. Everything needed to render or store a scan's
+/// summary is here, because the alternative - a sink reading it back off
+/// another sink - is what stopped a second sink from existing at all.
 /// </summary>
 /// <param name="Completed">The walk reached the end under its own power.</param>
 /// <param name="Stalled">The device stopped responding and the watchdog cancelled it.</param>
@@ -58,13 +77,55 @@ public interface IScanSink
 /// unavailable. Not "not media" - simply never looked at.
 /// </param>
 /// <param name="SubtreeLosses">
-/// Failures while LISTING a folder. Each one lost an unknown number of files
-/// beneath that point, so anything under those paths is unproven.
+/// Failures while LISTING a folder, excluding any the retry pass later walked
+/// successfully. Each remaining one lost an unknown number of files beneath
+/// that point, so anything under those paths is unproven.
+/// </param>
+/// <param name="SignatureChecksRun">
+/// How many files were expensive enough to need their bytes read. Near zero on
+/// phones (5 of 13,791 on one device) and near total on others (710 of 772 on
+/// an e-reader), so it says as much about the device as about the scan.
+/// </param>
+/// <param name="CaughtBySignatureOnly">
+/// Files that turned out to be media despite an unrecognised extension. These
+/// would have been missed entirely by extension matching alone.
+/// </param>
+/// <param name="SignatureCheckErrors">Reads that failed outright, rather than simply not matching.</param>
+/// <param name="FilesSkippedByBreaker">
+/// Files with an unrecognised extension that went unchecked because the circuit
+/// breaker had already given up on signature checking. Any of them could be a
+/// photo, so this is a count of genuine unknowns, not of skipped work.
+/// </param>
+/// <param name="SignatureCheckingDisabled">The breaker tripped at some point during this scan.</param>
+/// <param name="FilePropertyMisses">
+/// Files missing a property the device supplies for every other file.
+/// Containers are excluded: a storage root has no filename, size or modified
+/// date, and counting it reported a constant "3 errors" on every healthy scan.
 /// </param>
 public record ScanOutcome(
     bool Completed,
     bool Stalled,
     bool Faulted,
     bool CameraMode,
+    int MediaFiles,
+    int Documents,
     int UndeterminedFiles,
-    int SubtreeLosses);
+    int TotalFilesSeen,
+    int SubtreeLosses,
+    int SignatureChecksRun,
+    int CaughtBySignatureOnly,
+    int SignatureCheckErrors,
+    int FilesSkippedByBreaker,
+    bool SignatureCheckingDisabled,
+    int FilePropertyMisses)
+{
+    /// <summary>
+    /// True only when nothing at all casts doubt on the census. Deliberately
+    /// strict: a scan is either provably complete or it is partial, because
+    /// "mostly complete" is what lets a store conclude that files it never
+    /// looked at have been deleted from the phone.
+    /// </summary>
+    public bool IsTrustworthy =>
+        Completed && !Stalled && !Faulted && !CameraMode &&
+        UndeterminedFiles == 0 && SubtreeLosses == 0;
+}

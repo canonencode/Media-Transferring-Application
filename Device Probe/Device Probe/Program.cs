@@ -220,8 +220,64 @@ int signatureCheckErrors = 0;
 
 // The walk no longer prints anything. It reports to a sink, which is what lets
 // the SQLite writer consume the same scan without the walk knowing it exists.
-var sink = new ConsoleScanSink();
+//
+// Storage is allowed to fail; the scan is not. A database that cannot be opened
+// - a full disk, a file another process has locked - must not cost the user a
+// scan of their phone, so it is reported and dropped rather than thrown. The
+// same rule inside CompositeScanSink covers a sink that breaks mid-scan.
+// PROBE_NO_DB=1 scans without recording. Two honest uses, both of which need
+// the SAME build back to back: measuring what recording actually costs, and
+// exercising the console-only fallback on real hardware. Comparing against a
+// timing from an older build is how this project produced four wrong theories
+// about where its time went.
+bool recordingDisabled = Environment.GetEnvironmentVariable("PROBE_NO_DB") == "1";
+
+IScanSink? sqliteSink = null;
+if (recordingDisabled)
+{
+    Console.WriteLine("PROBE_NO_DB=1: this scan will not be recorded.");
+}
+else
+{
+    try
+    {
+        sqliteSink = new SqliteScanSink();
+        Console.WriteLine($"Recording this scan to: {SqliteScanSink.DefaultDatabasePath}");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[SINK FAILED] SQLite could not be opened, so this scan will not be recorded: {ex.Message}");
+    }
+}
+
+using var sinks = sqliteSink is null
+    ? new CompositeScanSink(new ConsoleScanSink())
+    : new CompositeScanSink(new ConsoleScanSink(), sqliteSink);
+
+// Deliberately typed as the interface. The walk used to hold the console sink's
+// concrete type and read its counters back to build the outcome, which quietly
+// made that one sink the scan's memory and left no room for a second. Declaring
+// it this way is what stops that from creeping back: nothing below can reach
+// past IScanSink, so anything the outcome needs has to be counted here.
+IScanSink sink = sinks;
+
 var health = new SessionHealthMonitor();
+
+// The census the walk reports on its own behalf, counted at the single point
+// where a file is classified. It lives in the library rather than as four ints
+// here so it can be tested without a phone - these are the numbers the user
+// reads to decide whether a scan can be trusted, and everything in this file
+// needs real hardware to exercise.
+var tally = new ScanTally();
+
+// One door for errors, so the walk's record and the sinks' can never disagree.
+// They could before: the outcome was built from the console sink's list, so an
+// error the walk knew about but had not forwarded simply would not have counted.
+void ReportError(ScanError error)
+{
+    tally.RecordError(error);
+    sink.OnError(error);
+}
 
 
 // Failed objects get one retry after the main walk. The parent PATH is stored
@@ -260,13 +316,11 @@ int sessionClosed = 0;
 // plain List<ScanError> at the same time as the scan thread appends to it.
 int outcomeReported = 0;
 
-// PRE-SQLITE: becomes "resolved" on the scan_error row; this set goes.
-// Folders that failed to list during the main walk but were successfully
-// re-walked by the retry pass. Without this the verdict kept reporting them as
-// lost - "N folder(s) could not be listed, losing everything beneath them" -
-// even though the retry had listed them and their files are in the results.
-// Wrong in the safe direction, but a verdict the user cannot act on or trust.
-var recoveredContainerIds = new HashSet<string>();
+// Folders the retry pass got back now live on the tally, which is also what
+// computes SubtreeLosses from them - see ScanTally.MarkContainerRecovered.
+// Keeping the set and the count in one place is the point: they were apart
+// before, and the verdict reported recovered folders as lost, telling the user
+// photographs were gone when they were listed on the screen above.
 
 // Watchdog state. Declared up here because the tree walk writes to it and is
 // handed to Task.Run before the watchdog itself is built.
@@ -291,15 +345,45 @@ int scanAborted = 0;
 int filePropertyMisses = 0;
 
 
-string? serialNumber = ReadDeviceString(serialKey);
-// PRE-SQLITE: these three are the device table's columns, and printing them is
-// all that happens to them today - OnScanStarted only receives deviceId and
-// friendlyName. A SqliteScanSink keyed on the serial cannot see the serial.
-Console.WriteLine($"Serial number: {serialNumber ?? "(not supplied)"}");
-Console.WriteLine($"Manufacturer/model: {ReadDeviceString(manufacturerKey) ?? "?"} / {ReadDeviceString(modelKey) ?? "?"}");
+// The device table's row, assembled once and handed over whole. These used to
+// be three loose reads that were printed and then dropped: OnScanStarted
+// received only the id and the friendly name, so a sink meant to key on the
+// serial could not actually see the serial.
+var identity = new DeviceIdentity(
+    WpdId: deviceId,
+    FriendlyName: friendlyName,
+    SerialNumber: ReadDeviceString(serialKey),
+    Manufacturer: ReadDeviceString(manufacturerKey),
+    Model: ReadDeviceString(modelKey));
+
+Console.WriteLine($"Serial number: {identity.SerialNumber ?? "(not supplied)"}");
+Console.WriteLine($"Manufacturer/model: {identity.Manufacturer ?? "?"} / {identity.Model ?? "?"}");
+if (identity.KeyIsFallback)
+{
+    Console.WriteLine("[NOTE] This device reports no serial number, so its history is filed under the WPD id, " +
+        "which embeds the USB port. Plugged into a different port it will look like a different device.");
+}
 
 bool cameraMode = IsCameraMode();
-sink.OnScanStarted(deviceId, friendlyName, cameraMode);
+sink.OnScanStarted(identity, cameraMode);
+
+// Built in one place because it is reported from two - the watchdog just before
+// it kills the process, and the normal finally. Those two used to assemble the
+// record separately, which is how they came to disagree: only one of them
+// excluded folders the retry pass had recovered, so the same scan could be
+// called lossy or clean depending on which thread got there first.
+//
+// Declared here rather than beside the other helpers because a local function
+// can only capture what is already in scope, and every figure below is.
+ScanOutcome BuildOutcome(bool completed, bool stalled, bool faulted) =>
+    tally.BuildOutcome(completed, stalled, faulted, cameraMode,
+        new SignatureStats(
+            ChecksRun: signatureChecksActuallyRun,
+            CaughtBySignatureOnly: caughtBySignatureOnly,
+            CheckErrors: signatureCheckErrors,
+            SkippedByBreaker: health.SkippedBecauseDisabled,
+            CheckingDisabled: health.CheckingDisabled),
+        filePropertyMisses);
 
 Console.WriteLine("Connected to device. Scanning file tree...\n");
 
@@ -448,16 +532,13 @@ var watchdog = new Thread(() =>
             // project exists to prevent.
             if (Interlocked.Exchange(ref outcomeReported, 1) == 0)
             {
-            sink.OnScanFinished(new ScanOutcome(
-                Completed: false,
-                Stalled: true,
-                Faulted: false,
-                CameraMode: cameraMode,
-                UndeterminedFiles: sink.UndeterminedFiles,
-                SubtreeLosses: sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext
-                                       && !recoveredContainerIds.Contains(e.ObjectId))));
-            Console.WriteLine($"Found before the device stopped answering: {sink.MediaFiles} media file(s) " +
-                $"and {sink.Documents} document(s) out of {sink.TotalFilesSeen} file(s) seen.");
+                // The outcome now carries the census itself, so the sinks print
+                // and store the full summary here. This used to be a bare
+                // "found before the device stopped answering" line, because the
+                // counts lived in the console sink and nothing else could see
+                // them - which meant a scan that died this way was never
+                // recorded anywhere but the screen.
+                sink.OnScanFinished(BuildOutcome(completed: false, stalled: true, faulted: false));
             }
             Console.Out.Flush();
             Environment.FailFast("WPD scan thread unrecoverable: wedged inside a COM call, Cancel() ignored.");
@@ -498,25 +579,18 @@ finally
     // to distinguish a complete census from a scan the watchdog cut short -
     // and a store that records a partial scan as complete will later conclude
     // that everything it did not see has been deleted from the phone.
-    // PRE-SQLITE: the outcome is assembled by reading ConsoleScanSink's own
-    // properties, which is why `sink` is declared as the concrete type rather
-    // than IScanSink. Nothing here compiles against the interface, so a second
-    // implementation cannot be dropped in. The walk needs to keep these two
-    // figures itself before that is possible.
     if (Interlocked.Exchange(ref outcomeReported, 1) == 0)
-    sink.OnScanFinished(new ScanOutcome(
-        // NOT just IsCompletedSuccessfully. A walk stopped by the abort flag
-        // returns normally, so the task "succeeds" - and ScanOutcome documents
-        // Completed as "reached the end under its own power". A sink trusting
-        // that alone (the SQLite one will) would record a cut-short scan as a
-        // full census and later conclude everything it missed was deleted.
-        Completed: scanTask.IsCompletedSuccessfully && Volatile.Read(ref scanAborted) == 0,
-        Stalled: stallDetected,
-        Faulted: scanFaulted,
-        CameraMode: cameraMode,
-        UndeterminedFiles: sink.UndeterminedFiles,
-        SubtreeLosses: sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext
-                                       && !recoveredContainerIds.Contains(e.ObjectId))));
+    {
+        sink.OnScanFinished(BuildOutcome(
+            // NOT just IsCompletedSuccessfully. A walk stopped by the abort flag
+            // returns normally, so the task "succeeds" - and ScanOutcome documents
+            // Completed as "reached the end under its own power". A sink trusting
+            // that alone (the SQLite one does) would record a cut-short scan as a
+            // full census and later conclude everything it missed was deleted.
+            completed: scanTask.IsCompletedSuccessfully && Volatile.Read(ref scanAborted) == 0,
+            stalled: stallDetected,
+            faulted: scanFaulted));
+    }
 }
 
 void RunRetryPass()
@@ -541,14 +615,16 @@ if (failedObjects.Count > 0)
     // the live list again, so reading its count afterwards would double-count.
     if (Volatile.Read(ref scanAborted) == 1)
     {
-        Console.WriteLine($"\nSkipping the retry pass: the device stopped responding, so re-asking it for " +
-            $"{failedObjects.Count} object(s) would only wait for answers that are not coming.");
+        sink.OnRetryFinished(RetryOutcome.WasSkipped(
+            failedObjects.Count,
+            $"the device stopped responding, so re-asking it for {failedObjects.Count} object(s) " +
+            "would only wait for answers that are not coming."));
         return;
     }
 
     var toRetry = failedObjects.ToList();
     int originalFailedCount = toRetry.Count;
-    Console.WriteLine($"\nRetrying {originalFailedCount} previously-failed object(s)...");
+    sink.OnRetryStarted(originalFailedCount);
 
     int recoveredFiles = 0;
     int recoveredFolders = 0;
@@ -651,7 +727,7 @@ if (failedObjects.Count > 0)
             // only those are worth un-counting here.
             if (stage is ScanStage.Enumerate or ScanStage.EnumerateNext)
             {
-                recoveredContainerIds.Add(objectId);
+                tally.MarkContainerRecovered(objectId);
             }
         }
         else
@@ -664,105 +740,28 @@ if (failedObjects.Count > 0)
     // Counted only after the work actually happened. The old version
     // incremented before the Android check and before the re-walk, so blocked
     // folders and folders that failed again both still reported as "recovered".
-    // PRE-SQLITE: console-only, and it is trust-relevant - how much of a scan
-    // was recovered versus lost belongs on the scan row, not just on screen.
-    // Needs a retry-level signal on IScanSink; there is none.
-    Console.WriteLine($"Retry result: {recoveredFiles} file(s) and {recoveredFolders} folder(s) recovered, " +
-        $"{stillUnreadable} still unreadable.");
-    if (hiddenSubtrees > 0)
-    {
-        Console.WriteLine($"[IMPORTANT] {hiddenSubtrees} of the unreadable object(s) could still be ENUMERATED, " +
-            "which means they are folders whose entire contents were silently lost from this scan.");
-    }
-    int newFailures = failedObjects.Count - originalFailedCount;
-    if (newFailures > 0)
-    {
-        Console.WriteLine($"({newFailures} new failure(s) occurred during the retry pass itself and were not retried again.)");
-    }
+    // How much of a scan was recovered versus lost is trust-relevant, so it
+    // goes to the sinks rather than only to the screen: it belongs on the scan
+    // row next to the verdict it qualifies.
+    sink.OnRetryFinished(new RetryOutcome(
+        Skipped: false,
+        SkipReason: null,
+        Attempted: originalFailedCount,
+        RecoveredFiles: recoveredFiles,
+        RecoveredFolders: recoveredFolders,
+        StillUnreadable: stillUnreadable,
+        HiddenSubtrees: hiddenSubtrees,
+        // Counted against the snapshot taken up front: a repeat failure during
+        // the pass appends to the live list, so reading its count afterwards
+        // would include the objects the pass started with.
+        NewFailures: failedObjects.Count - originalFailedCount));
 }
 }
 
-// PRE-SQLITE: this whole summary becomes a query, and for the console probe it
-// moves into ConsoleScanSink.OnScanFinished. Note what that move needs: the
-// sink holds the file totals, but the signature counters and the health state
-// below are locals here and reach no sink at all. They have to travel - as
-// arguments, or on ScanOutcome - before the block can move anywhere.
-Console.WriteLine($"\nDone. {sink.MediaFiles} media file(s) and {sink.Documents} document(s) found out of {sink.TotalFilesSeen} file(s) seen.");
-Console.WriteLine($"({caughtBySignatureOnly} of those were caught only by file signature - their extension wasn't recognized.)");
-Console.WriteLine($"Expensive signature check actually ran on {signatureChecksActuallyRun} file(s) (out of {sink.TotalFilesSeen} total).");
-Console.WriteLine($"Signature check itself errored (not just 'no match') on {signatureCheckErrors} file(s).");
-if (health.SkippedBecauseDisabled > 0)
-{
-    Console.WriteLine($"[IMPORTANT] {health.SkippedBecauseDisabled} file(s) with an unrecognized extension went " +
-        "UNCHECKED because the circuit breaker had already disabled signature checking. Any of them could be a " +
-        "real photo or video that this scan did not count.");
-}
-// PRE-SQLITE: the breaker's verdict belongs on the scan row - a scan that
-// stopped checking signatures partway is not fully trustworthy - but it reaches
-// no sink today, so ScanOutcome cannot carry it yet.
-Console.WriteLine(health.CheckingDisabled
-    ? "Session health: signature checking was DISABLED partway through this scan (see warning above)."
-    : "Session health: OK, signature checking ran normally for the whole scan.");
-
-if (filePropertyMisses > 0)
-{
-    Console.WriteLine($"\n[NOTE] {filePropertyMisses} file(s) were missing a property (name, size or date) that " +
-        "this device otherwise supplies for every file. Containers are not counted here, so each of these is " +
-        "a genuine gap worth a look.");
-}
-
-// PRE-SQLITE: becomes the scan_skipped_folder table. The console rendering
-// moves into ConsoleScanSink; this block leaves Program.cs.
-if (sink.SkippedFolders.Count > 0)
-{
-    Console.WriteLine($"\n{sink.SkippedFolders.Count} folder(s) deliberately not walked:");
-    foreach (var skipped in sink.SkippedFolders)
-    {
-        Console.WriteLine($"  {skipped}");
-    }
-}
-
-// PRE-SQLITE: becomes the scan_error table plus a GROUP BY. The console
-// rendering moves into ConsoleScanSink; this block leaves Program.cs.
-// Errors grouped by which call failed and why, instead of a flat count plus
-// the first ten messages. The breakdown is the point: an Enumerate/Next
-// failure loses a whole subtree while a Properties failure loses one object,
-// and one HResult repeated 1,400 times is a very different problem from five
-// different HResults - neither of which the old summary could express.
-if (sink.Errors.Count > 0)
-{
-    Console.WriteLine($"\n{sink.Errors.Count} device error(s) during this scan, by call site and cause:");
-    foreach (var group in sink.Errors
-        .GroupBy(e => (e.Stage, e.HResult))
-        .OrderByDescending(g => g.Count()))
-    {
-        var (stage, hresult) = group.Key;
-        string impact = stage switch
-        {
-            ScanStage.Enumerate => "lost the folder's entire contents",
-            ScanStage.EnumerateNext => "lost the rest of that folder's contents",
-            ScanStage.Properties => "lost one object (and its subtree, if it was a folder)",
-            _ => "lost one file's signature check"
-        };
-        Console.WriteLine($"  {group.Count(),6} x [{stage}] 0x{hresult:X8} - {impact}");
-        Console.WriteLine($"         e.g. \"{group.First().Message.Trim()}\" at {group.First().ParentPath}/");
-    }
-
-    int subtreeLosses = sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext);
-    if (subtreeLosses > 0)
-    {
-        Console.WriteLine($"\n[IMPORTANT] {subtreeLosses} of those errors happened while LISTING a folder, so an " +
-            "unknown number of files below those points were never seen at all. Affected folders:");
-        foreach (var path in sink.Errors
-            .Where(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext)
-            .Select(e => e.ParentPath)
-            .Distinct()
-            .Take(20))
-        {
-            Console.WriteLine($"  {(path.Length == 0 ? "/ (device root)" : path)}");
-        }
-    }
-}
+// The summary used to be printed from here. It now travels on ScanOutcome
+// and is rendered by ConsoleScanSink, which is what lets the SQLite sink
+// store the same figures instead of a second copy of them being computed.
+// Reporting is a sink's job; this file's job is the walk.
 
 // Releases the WPD session. Idempotent because it runs from the scan's
 // finally, from ProcessExit, and from Ctrl+C - whichever happens first wins
@@ -820,7 +819,7 @@ void PrintTree(string objectId, string parentPath)
     }
     catch (System.Runtime.InteropServices.COMException ex)
     {
-        sink.OnError(new ScanError(objectId, parentPath, ScanStage.Enumerate, ex.HResult, ex.Message));
+        ReportError(new ScanError(objectId, parentPath, ScanStage.Enumerate, ex.HResult, ex.Message));
         failedObjects.Add((objectId, parentPath, ScanStage.Enumerate));
         return;
     }
@@ -850,7 +849,7 @@ void PrintTree(string objectId, string parentPath)
                 // one object - the enumerator can't be resumed from where it
                 // stopped. Recorded as its own stage so the summary can say so
                 // out loud instead of burying it in a generic skip count.
-                sink.OnError(new ScanError(objectId, parentPath, ScanStage.EnumerateNext, ex.HResult, ex.Message));
+                ReportError(new ScanError(objectId, parentPath, ScanStage.EnumerateNext, ex.HResult, ex.Message));
                 failedObjects.Add((objectId, parentPath, ScanStage.EnumerateNext));
                 break;
             }
@@ -1011,6 +1010,11 @@ void ClassifyAndReportFile(DeviceObject obj, string parentPath, bool recovered)
     // to be irrelevant" - the only case worth a device round trip.
     FileKind kind = FileClassifier.ClassifyByName(obj.Name)
         ?? CheckSignatureWithHealthMonitoring(obj.ObjectId);
+
+    // Counted here, at the single point where a file is resolved, rather than
+    // inside a sink. The outcome has to be true no matter which sinks are
+    // attached - including none at all.
+    tally.CountFile(kind);
 
     sink.OnFile(obj, $"{parentPath}/{obj.Name}", kind, recovered);
 }
@@ -1228,7 +1232,7 @@ DeviceObject? GetObjectInfo(string objectId, string parentPath)
     }
     catch (System.Runtime.InteropServices.COMException ex)
     {
-        sink.OnError(new ScanError(objectId, parentPath, ScanStage.Properties, ex.HResult, ex.Message));
+        ReportError(new ScanError(objectId, parentPath, ScanStage.Properties, ex.HResult, ex.Message));
         failedObjects.Add((objectId, parentPath, ScanStage.Properties));
         return null;
     }

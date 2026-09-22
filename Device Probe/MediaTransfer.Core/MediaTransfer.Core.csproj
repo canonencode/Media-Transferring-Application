@@ -6,6 +6,20 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- SQLite, not COM: this is a plain managed library with a bundled native
+         engine, so it builds and tests under `dotnet` like the rest of this
+         project. The COM-free rule below is about the device layer, not about
+         dependencies in general. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!-- Pinned ahead of what Microsoft.Data.Sqlite asks for. Its default pulls
+         SQLitePCLRaw 2.1.11, which carries a high-severity advisory
+         (GHSA-2m69-gcr7-jv3q) in the bundled native engine. 2.1.13 is the same
+         major version - same managed API - with the fixed engine. Left explicit
+         so a restore cannot quietly fall back to the vulnerable build. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+  </ItemGroup>
+
   <!-- This project deliberately has NO COMReference and no dependency on the
        scanner executable. That is not incidental tidiness - it is the thing
        that keeps the claim "this logic is pure" honest:
