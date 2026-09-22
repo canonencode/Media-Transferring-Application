@@ -82,8 +82,8 @@
   <div class="sub">Android telefonlardaki fotoğraf ve videoları, veri kaybına karşı güvenli biçimde bilgisayara aktaran bir Windows masaüstü uygulamasının cihaz tarama katmanı</div>
 
   <div class="stats">
-    <div class="stat"><div class="n">4</div><div class="l">gerçek cihazda doğrulandı</div></div>
-    <div class="stat"><div class="n">198</div><div class="l">otomatik test, 55 ms</div></div>
+    <div class="stat"><div class="n">5</div><div class="l">gerçek cihazda doğrulandı</div></div>
+    <div class="stat"><div class="n">291</div><div class="l">otomatik test, 205 ms</div></div>
     <div class="stat"><div class="n">0</div><div class="l">hata, tam tarama</div></div>
     <div class="stat"><div class="n">100×</div><div class="l">ölçülen soğuk / sıcak farkı</div></div>
   </div>
@@ -422,7 +422,7 @@
 
 <!-- ================= 7. TEST ================= -->
 <h2 class="pb"><span class="num">7</span>Test Stratejisi</h2>
-<p>İki tamamlayıcı katman kullanıldı. Saf mantık birim testleriyle, donanıma dokunan kod gerçek cihazlarla doğrulanır. Test projesi kaynak dosyaları <i>bağlayarak</i> (link) derlenir, ana programa referans vermez: çıktısında tek bir COM interop dosyası bulunmaz, yani "bu sınıflar saftır" iddiasını derleyici doğrular.</p>
+<p>İki tamamlayıcı katman kullanıldı. Saf mantık birim testleriyle, donanıma dokunan kod gerçek cihazlarla doğrulanır. Saf mantık <code>MediaTransfer.Core</code> adlı ayrı bir kütüphanededir; bu kütüphane bilinçli olarak hiçbir COM referansı taşımaz. İddia böylece yorumla değil derlemeyle korunur: .NET Core MSBuild'in <code>ResolveComReference</code> görevi yoktur (MSB4803), dolayısıyla bu katmana bir COM bağımlılığı sızsa testler hiç çalışmaz olurdu.</p>
 <table>
 <tr><th style="width:26%">Test dosyası</th><th>Kapsadığı davranışlar</th></tr>
 <tr><td><code>FileClassifierNameTests</code></td><td>Her uzantı kategorisi; <code>null</code> (bilinmiyor, byte'lara bak) ile <code>Unknown</code> (kesinlikle ilgisiz) ayrımı; emoji, Türkçe karakter, uzantısız ad, sondaki nokta/boşluk, <code>.trashed-</code> adları; <b>tr-TR kültüründe</b> büyük/küçük harf güvenliği — Türkçe <code>İ</code> sorunu, her <code>.JPG</code>'yi cihaz okumasına gönderebilirdi.</td></tr>
@@ -434,7 +434,7 @@
   <div class="callout ok"><b>Testlerin bulduğu gerçek hatalar</b>BMP 2 byte, RIFF alt tipi, ftyp kutu uzunluğu, Android kuralı sabitlenmemiş. Hiçbiri canlı taramada görünmüyordu.</div>
   <div class="callout ok"><b>Testlerin geri döndürdüğü hatalı düzeltmeler</b>İki kez: BMP'ye tek yönlü sınır konmuştu; sondaki nokta yanlış yerde kırpılmıştı. Kırmızı testler işini yaptı.</div>
 </div>
-<p><b>Birim testiyle kapsanmayan:</b> COM tarafı — retry geçişi, akış okuma döngüsü, oturum kapatma, bekçi. Fiziksel telefon gerektirdikleri için birim testi yazılamaz. Bunun yerine dört gerçek cihazda doğrulama ve <code>PROBE_FORCE_STALL</code> kancasıyla iptal yolunun zorla tetiklenmesi kullanıldı; bu kanca, kod incelemesinin bulamadığı bekçi hatasını ortaya çıkaran testtir.</p>
+<p><b>Birim testiyle kapsanmayan:</b> COM tarafı — retry geçişi, akış okuma döngüsü, oturum kapatma, bekçi. Fiziksel telefon gerektirdikleri için birim testi yazılamaz. Bunun yerine beş gerçek cihazda doğrulama ve <code>PROBE_FORCE_STALL</code> kancasıyla iptal yolunun zorla tetiklenmesi kullanıldı; bu kanca, kod incelemesinin bulamadığı bekçi hatasını ortaya çıkaran testtir.</p>
 
 <!-- ================= 8. SONUÇLAR ================= -->
 <h2><span class="num">8</span>Ölçüm Sonuçları</h2>
@@ -458,8 +458,13 @@
 <tr><td>Samsung J7 Prime2</td><td>Eski Android, SD kart, 3 depolama nesnesi</td><td class="num">358</td><td class="num">9,6 sn</td><td class="good">COMPLETE, 0 hata</td></tr>
 <tr><td>Turkcell T70</td><td>ZTE yongası, farklı üretici</td><td class="num">91</td><td class="num">16 sn</td><td class="good">COMPLETE, 0 hata</td></tr>
 <tr><td>Samsung Tab S7 FE</td><td>Tablet</td><td class="num">62</td><td class="num">1,1 sn</td><td class="good">COMPLETE, 0 hata</td></tr>
+<tr><td>Kobo eReader</td><td>E-kitap okuyucu — MTP değil, USB yığın depolama</td><td class="num">772</td><td class="num">—</td><td class="good">COMPLETE, 0 hata</td></tr>
 </table>
 <p class="small">Cihazlar arası öğrenilenler: depolama adı üç farklı biçimde geliyor ("Dahili depolama", "Phone", "Dahili depolama birimi") — asla anahtar olarak kullanılmamalı; seri numarası formatı 8 ile 32 hane arasında değişiyor — opak string olarak tutulmalı; aynı uygulama (WhatsApp) eski ve yeni Android'de tamamen farklı yerlerde duruyor — klasör adına değil uzantıya göre sınıflandırma kararı bununla doğrulandı.</p>
+
+<p class="small"><b>Kobo bulgusu — imza yolunun asıl sınavı.</b> Telefonlarda içerik imzası neredeyse hiç çalışmaz: A56'da 13.791 dosyanın yalnızca <b>5</b>'inde çalıştı. Kobo'da ise 772 dosyanın <b>710</b>'unda çalıştı ve bulunan 620 medya dosyasının <b>tamamı</b> yalnızca imzayla yakalandı — hiçbirinin uzantısı tanınmıyordu. Yalnızca uzantıya bakan bir sınıflandırma bu cihazda <b>sıfır</b> dosya bulurdu. Telefonlarda "güvenlik ağı" gibi duran ve %99,96 oranında hiç çalışmayan bu yol, burada tek işleyen mekanizma oldu.</p>
+
+<p class="small"><b>İkinci bulgu — taşıma katmanı bağımsızlığı.</b> Kobo, MTP değil USB yığın depolama konuşur (cihaz kimliğinde <code>usbstor#disk</code> görülür). Kod MTP'ye özgü varsayım yapmadığı, WPD soyutlamasına yazıldığı için taşıma protokolü tamamen değiştiği hâlde tarama değişmeden, hatasız çalıştı. Bu, "MTP ayrıntılarına değil WPD'ye kod yaz" kararının sınanmış karşılığıdır.</p>
 
 <!-- ================= 9. DERSLER ================= -->
 <h2><span class="num">9</span>Öğrenilen Dersler</h2>
@@ -507,7 +512,7 @@
 <h2 class="pb"><span class="num">12</span>Yönetici Özeti</h2>
 <div class="exec">
 <h3>Ne yapıldı</h3>
-<p>Android telefonlardaki fotoğraf ve videoları bilgisayara güvenli biçimde aktaracak bir Windows uygulamasının <b>cihaz tarama katmanı</b> tasarlandı, gerçeklendi ve dört gerçek cihazda doğrulandı. Katman, telefona MTP protokolüyle bağlanır, tüm dosya ağacını yürür, her dosyayı uzantı ve içerik imzasıyla sınıflandırır, güvenilmez donanım karşısında hatasız çalışmaya devam eder ve <b>sonucunun tam mı eksik mi olduğunu açıkça bildirir</b>.</p>
+<p>Android telefonlardaki fotoğraf ve videoları bilgisayara güvenli biçimde aktaracak bir Windows uygulamasının <b>cihaz tarama katmanı</b> tasarlandı, gerçeklendi ve beş gerçek cihazda doğrulandı. Katman, telefona MTP protokolüyle bağlanır, tüm dosya ağacını yürür, her dosyayı uzantı ve içerik imzasıyla sınıflandırır, güvenilmez donanım karşısında hatasız çalışmaya devam eder ve <b>sonucunun tam mı eksik mi olduğunu açıkça bildirir</b>.</p>
 
 <h3>Neden önemli</h3>
 <p>Mevcut ticari araçların temel sorunu, aktarımın yarıda kesildiğinde hangi dosyanın kopyalandığını bilmemeleridir. Bu sorunun kökü, uygulamanın cihazda ne olduğunu güvenilir biçimde bilmemesidir. Çalışma boyunca ölçüldü ki bir tarama "0 hata, oturum sağlıklı" raporlarken bile cihazdaki tüm videoları kaçırabiliyor (PTP modu) ya da kamera klasörünün tamamını görmezden gelebiliyor (hata alan klasörün dosya sanılması). Bu nedenle katmanın birincil tasarım hedefi hız değil <b>dürüstlük</b> oldu: eksik bir tarama tam görünemez.</p>
@@ -516,7 +521,7 @@
 <p>Altı bileşen, tek ilkeyle ayrıştırıldı: <b>donanıma dokunan kod ile karar veren kod ayrı yaşar.</b> Sınıflandırma (<code>FileClassifier</code>), klasör politikası (<code>FolderPolicy</code>) ve sağlık izleme (<code>SessionHealthMonitor</code>) saf sınıflardır; COM, cihaz ya da konsol bilmezler. Tarama, sonuçlarını bir arayüze (<code>IScanSink</code>) raporlar; bugün konsol, bir sonraki aşamada SQLite bu arayüzün gerçekleştirmeleridir. Kullanılan kalıplar: devre kesici, bekçi, bağımlılığın tersine çevrilmesi, işlevsel çekirdek / buyurgan kabuk, ertelenmiş yeniden deneme, değişmez veri tipleri. Bilinçli olarak kullanılmayanlar: DI konteyneri, repository kalıbı, tek gerçekleştirmeli soyut arayüzler.</p>
 
 <h3>Test</h3>
-<p>198 birim testi, 55 milisaniyede, telefon olmadan çalışır ve saf mantığın tamamını kapsar. Bu testler, canlı taramanın sağlıklı dediği kodda yedi ölçülebilir hata buldu ve iki hatalı düzeltmeyi geri döndürdü. Donanıma dokunan kod dört gerçek cihazla ve zorla tetiklenen hata senaryolarıyla doğrulandı. Test projesi kaynak dosyaları bağlayarak derlenir; çıktısında hiçbir COM bağımlılığı bulunmaz, yani "bu sınıflar saftır" iddiasını derleyici kanıtlar.</p>
+<p>291 birim testi, 205 milisaniyede, telefon olmadan çalışır ve saf mantığın tamamını kapsar. Bu testler, canlı taramanın sağlıklı dediği kodda yedi ölçülebilir hata buldu ve iki hatalı düzeltmeyi geri döndürdü. Donanıma dokunan kod beş gerçek cihazla ve zorla tetiklenen hata senaryolarıyla doğrulandı. Saf mantık, COM referansı taşımayan ayrı bir kütüphanede durur; bu katmana bir COM bağımlılığı sızsa testler derlenemez olurdu, yani "bu sınıflar saftır" iddiasını derleyici kanıtlar.</p>
 
 <h3>Sonuçlar</h3>
 <table style="margin-top:6px">
@@ -526,7 +531,7 @@
 <tr><td>Görülen kök klasör</td><td class="num">8 / 17</td><td class="num good">16 / 16</td></tr>
 <tr><td>Kamera klasörü (DCIM)</td><td class="num badc">görünmüyor</td><td class="num good">4.005 dosya</td></tr>
 <tr><td>Eksik tarama tespiti</td><td class="num badc">yok</td><td class="num good">COMPLETE / PARTIAL verdiği</td></tr>
-<tr><td>Doğrulanan cihaz</td><td class="num">1</td><td class="num good">4</td></tr>
+<tr><td>Doğrulanan cihaz</td><td class="num">1</td><td class="num good">5</td></tr>
 </table>
 
 <h3>Başlıca bulgular</h3>
@@ -555,7 +560,7 @@
   <li><b>Ölçüm:</b> Süre için dört yanlış teori; süreç içi kronometre gerçek sebebi buldu (sürücü önbelleği, 100×). Property okumanın bedava olduğu kontrollü A/B ile kanıtlandı.</li>
   <li><b>Ürün gerçekleri:</b> Küçük resim ve önbellek klasörleri (medyanın %46'sı) ile çıkartmalar dışlandı; PTP modunun sessiz veri kaybı (289 → 222 dosya) tespit edilip uyarı eklendi.</li>
   <li><b>Bekçi:</b> Donmayı ilerlemeye bakarak tespit eder; zorla tetiklenince <code>Cancel()</code>'ın döngüyü durdurmadığı görüldü, dur bayrağı eklendi; kurtarılamayan donmada sayım raporlanıp çıkılır.</li>
-  <li><b>Ayrıştırma ve test:</b> Tek dosya 6 parçaya bölündü; saf mantık 198 birim testiyle, donanım tarafı 4 gerçek cihazla doğrulandı. Tarama artık COMPLETE / PARTIAL verdiği veriyor.</li>
+  <li><b>Ayrıştırma ve test:</b> Tek dosya 6 parçaya bölündü; saf mantık 291 birim testiyle, donanım tarafı 5 gerçek cihazla doğrulandı. Tarama artık COMPLETE / PARTIAL verdiği veriyor.</li>
 </ol>
 <p class="small">Ayrıntı: Bölüm 6, 11.</p>
 
@@ -567,7 +572,7 @@
 <table style="margin-top:4px">
 <tr><th style="width:30%">Katman</th><th>Ne var</th><th style="width:22%">Ne buldu</th></tr>
 <tr><td><b>Birim testleri</b><br><span class="small">198 test · 55 ms · telefonsuz</span></td><td>Uzantı ve imza sınıflandırması (her format, yanlış pozitifler, emoji, Türkçe, uzantısız), klasör politikası (Android/data sabitlemesi, önbellek, çıkartma), devre kesici eşiği ve durum geçişleri. Test projesi kaynakları bağlayarak derlenir; COM bağımlılığı yoktur.</td><td>7 gerçek hata; 2 hatalı düzeltmeyi geri döndürdü</td></tr>
-<tr><td><b>Gerçek cihaz doğrulaması</b><br><span class="small">4 cihaz</span></td><td>Samsung A56, J7 Prime2 (SD kartlı), Turkcell T70 (ZTE), Tab S7 FE. Her düzeltme sonrası tam tarama, sayılar karşılaştırıldı. Kablo sökme-takma, port değiştirme, MTP/PTP geçişi.</td><td>PTP kaybı, port kararlılığı, soğuk önbellek</td></tr>
+<tr><td><b>Gerçek cihaz doğrulaması</b><br><span class="small">5 cihaz</span></td><td>Samsung A56, J7 Prime2 (SD kartlı), Turkcell T70 (ZTE), Tab S7 FE, Kobo eReader (USB yığın depolama). Her düzeltme sonrası tam tarama, sayılar karşılaştırıldı. Kablo sökme-takma, port değiştirme, MTP/PTP geçişi.</td><td>PTP kaybı, port kararlılığı, soğuk önbellek</td></tr>
 <tr><td><b>Zorlamalı hata senaryosu</b><br><span class="small">PROBE_FORCE_STALL</span></td><td>Bekçi kasıtlı olarak tetiklenip iptal → geri sarma → PARTIAL yolu uçtan uca doğrulandı.</td><td>Cancel()'ın döngüyü durdurmadığı</td></tr>
 </table>
 <p class="small">Kapsanmayan: COM tarafı birim testiyle test edilemez (telefon gerekir); bu boşluk gerçek cihaz doğrulamasıyla kapatıldı. Ayrıntı: Bölüm 7.</p>
