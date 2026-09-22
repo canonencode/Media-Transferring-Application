@@ -21,7 +21,7 @@ public class CompositeScanSinkTests
     static ScanOutcome Outcome() =>
         new(Completed: true, Stalled: false, Faulted: false, CameraMode: false,
             MediaFiles: 1, Documents: 0, UndeterminedFiles: 0, TotalFilesSeen: 1,
-            SubtreeLosses: 0, SignatureChecksRun: 0, CaughtBySignatureOnly: 0,
+            SubtreeLosses: 0, UnresolvedObjects: 0, SignatureChecksRun: 0, CaughtBySignatureOnly: 0,
             SignatureCheckErrors: 0, FilesSkippedByBreaker: 0,
             SignatureCheckingDisabled: false, FilePropertyMisses: 0);
 

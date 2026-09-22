@@ -2,8 +2,39 @@
 
 **Tarih:** 2026-09-22
 **İncelenen commit:** `423177f`
-**Durum:** kardinal ve sessiz hataların hiçbiri düzeltilmedi. Bu belge düzeltme
-oturumunun giriş listesidir.
+**Durum:** A ve B gruplarının tamamı ile D grubu **düzeltildi** (2026-09-23).
+Kalanlar: C grubu (iş parçacığı yarışları), E grubu (şema), F grubu (test delikleri).
+
+**2026-09-23 — düzeltmeler** (`docs/sqlite-bulgular/` testleri test projesine taşındı,
+68 test, 18 başarısız → 0; takım 360 → 434, süre 94 sn → 10 sn):
+
+| Bulgu | Nasıl kapatıldı |
+|---|---|
+| A1, A2 | `finished` bayrağı: bitmiş sink olay kabul etmiyor, ikinci `OnScanFinished` reddediliyor |
+| A3 | Retry, tally'ye yeni bir listeleme hatası düşüp düşmediğine bakarak yeniden yürüyüşün başarısını doğruluyor; başarısızsa `stillUnreadable` sayılıyor, kurtarıldı denmiyor |
+| A4 | `ScanTally.UnresolvedObjects` + `ScanOutcome.UnresolvedObjects`; `IsTrustworthy` onu da gözetiyor. `HiddenSubtrees` bunun alt kümesi olduğu için tek koşul ikisini kapsıyor |
+| A5 | `CultureInfo.InvariantCulture`. `Z` soneki **eklenmedi** — mevcut satırlar onsuz ve biçim değişikliği veri göçü demek, `user_version` işiyle birlikte yapılmalı |
+| B1 | `ScanId == 0` ve `ExecuteNonQuery() != 1` gürültülü patlıyor |
+| B2, B3 | `Dispose` kaybedilen satır sayısını stderr'e bildiriyor; `finally` ile temizlik garanti |
+| B4 | `long.MaxValue`'yu aşan boyut `NULL` |
+| B5 | Kurucu, `Open()` sonrası hata olursa bağlantıyı kapatıyor; **havuzlama kapatıldı** (`Pooling=false`) — havuz `Dispose`'dan sonra dosyayı açık tutuyordu |
+| B6 | `":memory:"` ve `file:` reddediliyor; yol `GetFullPath` ile normalize |
+| B7 | Saklanamayan ad **yine kaydediliyor** (dosya kaybedilmiyor) ama `[UNSTORABLE NAME]` ile bildiriliyor |
+| D1 | `DefaultTimeout = 3` — 30 sn donma yerine 3 sn'de açık hata |
+| D2 | İkinci `OnScanStarted` hiçbir şey yazmadan reddediliyor |
+| D3, D4 | `DeviceIdentity.TrimmedSerial`; `serial` sütunu ve `key_is_fallback` artık aynı şeyi söylüyor |
+
+**İki bulguda ajanla aynı fikirde olunmadı, gerekçeleriyle testlere yazıldı:**
+- Seri numarasında büyük-küçük harf **katlanmıyor**. Katlamak birleştirme yönü (iki telefonun
+  geçmişini karıştırmak, bölmekten kötü) ve `ToUpperInvariant` Türkçe `ı`'yı `I`'ya çevirerek
+  gerçekten farklı iki seriyi birleştirirdi.
+- İki eşzamanlı yazıcı **desteklenmiyor**. SQLite tek yazıcıya izin veriyor ve gruplama,
+  gerçek `Process.Kill` ile kanıtlanmış dayanıklılık özelliği; onu feda etmek yerine ikinci
+  yazıcı hızlı ve açık şekilde reddediliyor.
+
+**Saklanmayan tek yeni alan:** `UnresolvedObjects` scan satırına sütun olarak eklenmedi —
+`CREATE TABLE IF NOT EXISTS` mevcut veritabanlarına sütun ekleyemiyor (E1). Yine de
+trust açısından kritik olan kısmı `status` üzerinden saklanıyor.
 
 **2026-09-23'te yapılanlar** (liste dışı, ayrıca istendi):
 - Yorumlar koda göre yeniden yazıldı; yalan söyleyenler düzeltildi, bilinen hatalar

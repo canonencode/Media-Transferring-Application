@@ -1,4 +1,5 @@
-﻿using Microsoft.Data.Sqlite;
+﻿using System.Globalization;
+using Microsoft.Data.Sqlite;
 
 namespace MediaTransfer.Core;
 
@@ -15,14 +16,14 @@ namespace MediaTransfer.Core;
 /// this project may assume a scan finished; the whole reason the project exists
 /// is that an interrupted transfer which LOOKS finished is how files get lost.
 ///
-/// That promise has two holes today, both known and unfixed - findings A1 and
-/// A2 in docs/INCELEME-SQLITE-2026-09-22.md. OnScanFinished does not close the
-/// sink, so files reported afterwards are still written INTO a row that already
-/// says 'complete': a real Process.Kill run recorded 2,600 files reported,
-/// 2,000 rows on disk and total_files_seen saying 100, all under status
-/// 'complete'. And a second OnScanFinished rewrites the status, so it can
-/// promote a 'partial' scan to 'complete'. The scanner guards the second case
-/// with Interlocked; this class should not be relying on its caller for that.
+/// The sink closes when the walk ends. Events reported afterwards are refused,
+/// and so is a second OnScanFinished - both used to be accepted, and both broke
+/// the promise above. A real Process.Kill run once recorded 2,600 files
+/// reported, 2,000 rows on disk and total_files_seen saying 100, all under
+/// status 'complete'; a second finish call could rewrite a 'partial' scan as a
+/// complete census. The scanner also guards the second case with Interlocked,
+/// but a class whose whole job is to be trustworthy cannot depend on its caller
+/// for that.
 /// </summary>
 public sealed class SqliteScanSink : IScanSink, IDisposable
 {
@@ -54,6 +55,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     SqliteCommand? insertError;
     int rowsSinceCommit;
     RetryOutcome? retry;
+    bool finished;
 
     /// <summary>Where scans are recorded when no other path is given.</summary>
     public static string DefaultDatabasePath => Path.Combine(
@@ -76,10 +78,29 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
 
     public SqliteScanSink(string? databasePath = null, int retainedScansPerDevice = DefaultRetainedScansPerDevice)
     {
-        DatabasePath = databasePath ?? DefaultDatabasePath;
+        string requested = databasePath ?? DefaultDatabasePath;
+
+        // ":memory:" and "file:..." are magic DataSource values for
+        // Microsoft.Data.Sqlite, not paths. Passed through, ":memory:" gives a
+        // sink that accepts an entire scan, reports no error and throws every
+        // row away on Dispose - nothing in the caller's experience would say
+        // the scan was never recorded. A caller-supplied path that means "do
+        // not actually store anything" is refused outright.
+        if (string.Equals(requested, ":memory:", StringComparison.OrdinalIgnoreCase) ||
+            requested.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                $"'{requested}' is a SQLite in-memory or URI data source, not a file path. " +
+                "A scan recorded there would be discarded silently.", nameof(databasePath));
+        }
+
+        // Resolved once, so the folder created below and the file opened after
+        // it cannot disagree, and so DatabasePath means the same thing to a
+        // caller no matter what the working directory was.
+        DatabasePath = Path.GetFullPath(requested);
         this.retainedScansPerDevice = retainedScansPerDevice;
 
-        string? folder = Path.GetDirectoryName(Path.GetFullPath(DatabasePath));
+        string? folder = Path.GetDirectoryName(DatabasePath);
         if (!string.IsNullOrEmpty(folder))
         {
             Directory.CreateDirectory(folder);
@@ -89,25 +110,47 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         {
             DataSource = DatabasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
+
+            // SQLite allows one writer at a time, and this sink holds a write
+            // transaction across a batch of rows, so a second scan writing to
+            // the same database has to wait. The default wait is 30 seconds,
+            // which a user reads as a freeze - and their obvious response,
+            // unplug and try again, walks straight back into the same lock.
+            // Three seconds is long enough to ride out a batch commit and short
+            // enough to be reported as what it is.
+            DefaultTimeout = 3,
+
+            // Pooling returns a disposed connection to a cache instead of
+            // closing it, so the database file stays open after a scan ends and
+            // after a constructor fails - which is precisely the "the fallback
+            // hits a locked file too" problem the dispose-on-failure below
+            // exists to prevent. One sink holds one connection for the length of
+            // one scan, so there is nothing for a pool to save here anyway.
+            Pooling = false,
         }.ToString());
         connection.Open();
 
-        // The four statements below run on an already-open connection, and if
-        // any of them throws, the constructor escapes without closing it -
-        // finding B5, known and not yet fixed. Throwing is the intended
-        // behaviour (Program.cs catches it and scans without recording), but
-        // the point of throwing is to let the caller fall back, and a leaked
-        // connection keeps the file locked until GC, so retrying the same path
-        // fails too.
-
-        // WAL so a reader (a UI, later) can look at previous scans while this
-        // one is still writing. NORMAL rather than FULL because a scan is
-        // reproducible - rerunning it costs seconds, and the scan row's status
-        // already marks anything that did not finish.
-        Run("PRAGMA journal_mode=WAL;");
-        Run("PRAGMA synchronous=NORMAL;");
-        Run("PRAGMA foreign_keys=ON;");
-        Run(Schema);
+        // Everything past Open() runs on a connection this constructor owns,
+        // and the point of throwing is to let the caller fall back to another
+        // path or to scanning without a record. A leaked connection would hold
+        // the file open until GC, so the fallback would hit a locked file and
+        // fail too - the failure handling would become the failure.
+        try
+        {
+            // WAL so a reader (a UI, later) can look at previous scans while
+            // this one is still writing. NORMAL rather than FULL because a scan
+            // is reproducible - rerunning it costs seconds, and the scan row's
+            // status already marks anything that did not finish.
+            Run("PRAGMA journal_mode=WAL;");
+            Run("PRAGMA synchronous=NORMAL;");
+            Run("PRAGMA foreign_keys=ON;");
+            Run(Schema);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
     }
 
     void Run(string sql)
@@ -225,6 +268,19 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
 
     public void OnScanStarted(DeviceIdentity device, bool cameraMode)
     {
+        if (finished) throw AlreadyFinished();
+
+        // Checked before anything is written. A second call used to insert its
+        // scan row, commit it, then throw while rebuilding the statements -
+        // leaving a 'running' row that no code path could ever finish, and a
+        // ScanId pointing at the wrong one.
+        if (ScanId != 0)
+        {
+            throw new InvalidOperationException(
+                $"This sink is already recording scan {ScanId}. One sink records one scan; " +
+                "create another for the next one.");
+        }
+
         deviceKey = device.DeviceKey;
         string now = Timestamp();
 
@@ -250,7 +306,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
             upsert.Parameters.AddWithValue("$fallback", device.KeyIsFallback ? 1 : 0);
             upsert.Parameters.AddWithValue("$wpd", device.WpdId);
             upsert.Parameters.AddWithValue("$name", device.FriendlyName);
-            upsert.Parameters.AddWithValue("$serial", Nullable(device.SerialNumber));
+            upsert.Parameters.AddWithValue("$serial", Nullable(device.TrimmedSerial));
             upsert.Parameters.AddWithValue("$manufacturer", Nullable(device.Manufacturer));
             upsert.Parameters.AddWithValue("$model", Nullable(device.Model));
             upsert.Parameters.AddWithValue("$now", now);
@@ -316,20 +372,22 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
 
     public void OnFile(DeviceObject obj, string path, FileKind kind, bool recovered)
     {
-        var command = insertFile ?? throw NotStarted();
+        var command = Accepting(insertFile);
         command.Parameters["$scan"].Value = ScanId;
-        command.Parameters["$path"].Value = path;
-        command.Parameters["$name"].Value = obj.Name;
+        command.Parameters["$path"].Value = Announce(path, "file path");
+        command.Parameters["$name"].Value = Announce(obj.Name, "file name");
         command.Parameters["$object"].Value = obj.ObjectId;
         command.Parameters["$persistent"].Value = Nullable(obj.PersistentId);
-        // BUG, known and not yet fixed - finding B4. Size is a ulong and this
-        // cast is unchecked, so a value above long.MaxValue wraps to a negative
-        // number. The realistic trigger is not a 9-exabyte file but an MTP
-        // stack reporting 0xFFFFFFFFFFFFFFFF as "size unknown", which lands
-        // here as -1 and reads back as a measured fact. ScanTypes says exactly
-        // why that is forbidden: a fabricated value passes for a measured one.
-        // DBNull is the honest answer.
-        command.Parameters["$size"].Value = obj.Size is { } size ? (long)size : DBNull.Value;
+        // SQLite has no unsigned 64-bit integer, and an unchecked cast of a
+        // value above long.MaxValue wraps to a negative one. The realistic
+        // trigger is not a 9-exabyte file but an MTP stack reporting
+        // 0xFFFFFFFFFFFFFFFF for "size unknown", which used to land here as -1
+        // and read back as a measured fact. ScanTypes says exactly why that is
+        // forbidden: a fabricated value passing for a measured one. A size we
+        // cannot represent is a size the device did not usefully tell us, so it
+        // is stored the same way as one it never gave at all.
+        command.Parameters["$size"].Value =
+            obj.Size is { } size && size <= long.MaxValue ? (long)size : DBNull.Value;
         command.Parameters["$modified"].Value = Nullable(obj.ModifiedRaw);
         command.Parameters["$kind"].Value = kind.ToString();
         command.Parameters["$recovered"].Value = recovered ? 1 : 0;
@@ -339,10 +397,10 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
 
     public void OnFolder(DeviceObject obj, string path, bool recovered)
     {
-        var command = insertFolder ?? throw NotStarted();
+        var command = Accepting(insertFolder);
         command.Parameters["$scan"].Value = ScanId;
-        command.Parameters["$path"].Value = path;
-        command.Parameters["$name"].Value = obj.Name;
+        command.Parameters["$path"].Value = Announce(path, "folder path");
+        command.Parameters["$name"].Value = Announce(obj.Name, "folder name");
         command.Parameters["$object"].Value = obj.ObjectId;
         command.Parameters["$persistent"].Value = Nullable(obj.PersistentId);
         command.Parameters["$recovered"].Value = recovered ? 1 : 0;
@@ -352,7 +410,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
 
     public void OnFolderSkipped(string path, string reason)
     {
-        var command = insertSkipped ?? throw NotStarted();
+        var command = Accepting(insertSkipped);
         command.Parameters["$scan"].Value = ScanId;
         command.Parameters["$path"].Value = path;
         command.Parameters["$reason"].Value = reason;
@@ -362,7 +420,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
 
     public void OnError(ScanError error)
     {
-        var command = insertError ?? throw NotStarted();
+        var command = Accepting(insertError);
         command.Parameters["$scan"].Value = ScanId;
         command.Parameters["$object"].Value = error.ObjectId;
         command.Parameters["$parent"].Value = error.ParentPath;
@@ -378,12 +436,35 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     // than issued as an extra UPDATE: if the process dies in between, the row
     // stays 'running' and no retry figures are claimed for a scan that never
     // finished.
-    public void OnRetryStarted(int objectCount) { }
+    public void OnRetryStarted(int objectCount)
+    {
+        if (finished) throw AlreadyFinished();
+    }
 
-    public void OnRetryFinished(RetryOutcome outcome) => retry = outcome;
+    public void OnRetryFinished(RetryOutcome outcome)
+    {
+        // Deliberately does NOT require a started scan. The retry pass can
+        // report that it was skipped on a walk that never got far enough to
+        // open a scan row, and turning that into an exception would replace a
+        // recoverable situation with a crash. It is held in a field; only
+        // OnScanFinished writes it, and that call does demand a scan.
+        if (finished) throw AlreadyFinished();
+        retry = outcome;
+    }
 
     public void OnScanFinished(ScanOutcome outcome)
     {
+        // A second call would rewrite the status, and the later verdict would
+        // win - so an outer finally calling this after an inner catch already
+        // did could turn a scan recorded as cut short into a complete census.
+        if (finished) throw AlreadyFinished();
+
+        // Without a scan row there is nothing to update, and the UPDATE below
+        // would match zero rows and return quietly. A caller whose
+        // OnScanStarted was skipped would then watch a scan run start to finish
+        // with no error while the database held nothing at all.
+        if (ScanId == 0) throw NotStarted();
+
         Commit();
 
         using var update = connection.CreateCommand();
@@ -441,9 +522,17 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         // 0 and throws nothing, so a caller sees a scan run start to finish
         // while the database holds nothing at all. OnFile guards that case
         // loudly; the call that can least afford to fail quietly is the one
-        // that does. Treating a row count other than 1 as an error fixes it.
-        update.ExecuteNonQuery();
+        // Checked, because a silent no-op is the one answer this call must
+        // never give: it is the moment a scan becomes readable as a census.
+        int updated = update.ExecuteNonQuery();
+        if (updated != 1)
+        {
+            throw new InvalidOperationException(
+                $"Finishing scan {ScanId} updated {updated} rows instead of 1. The scan row is " +
+                "missing or duplicated, so this scan's status cannot be trusted.");
+        }
 
+        finished = true;
         Prune();
     }
 
@@ -563,25 +652,112 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         AttachTransaction();
     }
 
+    /// <summary>
+    /// True when the text contains a surrogate that has no partner. MTP names
+    /// arrive as raw UTF-16 from COM and nothing validates them; an unpaired
+    /// surrogate is not encodable as UTF-8, so the binding layer silently
+    /// substitutes U+FFFD and the stored path stops matching the device's.
+    /// </summary>
+    static bool HasLoneSurrogate(string text)
+    {
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (char.IsHighSurrogate(text[i]))
+            {
+                if (i + 1 >= text.Length || !char.IsLowSurrogate(text[i + 1])) return true;
+                i++;
+            }
+            else if (char.IsLowSurrogate(text[i]))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Announces a name the database cannot store faithfully, and returns it
+    /// anyway.
+    ///
+    /// The row is still written, because dropping it would lose a file the
+    /// device really has - the one thing this project refuses to do. But the
+    /// stored path no longer matches the device's, so the file cannot be found
+    /// again from this row, and that has to be said out loud rather than
+    /// discovered later by someone wondering why a copy failed.
+    /// </summary>
+    string Announce(string value, string what)
+    {
+        if (!HasLoneSurrogate(value)) return value;
+
+        Console.Error.WriteLine(
+            $"[UNSTORABLE NAME] A {what} contains an unpaired UTF-16 surrogate, which cannot be " +
+            $"written as text. The row is recorded with a replacement character, so this file " +
+            $"cannot be located from the database: {Printable(value)}");
+        return value;
+    }
+
+    /// <summary>
+    /// A form of the text safe to write to a console, which cannot encode an
+    /// unpaired surrogate either - so the warning about an unprintable name
+    /// would otherwise be unprintable itself.
+    /// </summary>
+    static string Printable(string text)
+    {
+        var chars = text.ToCharArray();
+        for (int i = 0; i < chars.Length; i++)
+        {
+            if (char.IsHighSurrogate(chars[i]) && i + 1 < chars.Length && char.IsLowSurrogate(chars[i + 1]))
+            {
+                i++;
+            }
+            else if (char.IsSurrogate(chars[i]))
+            {
+                chars[i] = '?';
+            }
+        }
+        return new string(chars);
+    }
+
     static object Nullable(string? value) =>
         string.IsNullOrEmpty(value) ? DBNull.Value : value;
 
-    // Meant to be sortable and unambiguous, because started_utc/finished_utc are
-    // TEXT and sort lexically, and that matters the moment two scans are
-    // compared to work out what was added or removed.
+    // Sortable and unambiguous, because started_utc/finished_utc are TEXT and
+    // sort lexically, and that ordering decides which scan counts as current.
     //
-    // BUG, known and not yet fixed - finding A5 in
-    // docs/INCELEME-SQLITE-2026-09-22.md. There is no CultureInfo here, so the
-    // format follows the machine's region setting: ar-SA writes a Hijri year
-    // (1448), th-TH a Buddhist one (2569). Those sort BEFORE every Gregorian
-    // row, so "the newest scan" resolves to the oldest and a stale census gets
-    // compared against the live phone. A Windows region setting is enough to
-    // trigger it. The fix is CultureInfo.InvariantCulture, plus a Z suffix so
-    // the value says out loud that it is UTC.
-    static string Timestamp() => DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff");
+    // InvariantCulture is the whole point of this method. Without it the format
+    // follows the machine's region setting, so ar-SA writes a Hijri year (1448)
+    // and th-TH a Buddhist one (2569) - values that sort BEFORE every Gregorian
+    // row in the same column. "The newest scan" then resolves to the oldest,
+    // and a stale census gets compared against the live phone, reporting files
+    // that are still there as deleted. A Windows region setting was enough to
+    // trigger it; no code change required.
+    //
+    // No Z suffix, deliberately, even though the value IS UTC and saying so
+    // would be better: the column already holds rows written without one, and
+    // changing the format is a data migration rather than a bug fix. It belongs
+    // with the user_version work.
+    static string Timestamp() =>
+        DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The gate every event-recording call passes through. A scan that has not
+    /// started has nowhere to put a row; a scan that has finished has published
+    /// a census, and a row accepted afterwards would contradict it. Both are
+    /// caller mistakes, and both refuse loudly - the alternative is a database
+    /// that disagrees with its own scan row and says nothing about it.
+    /// </summary>
+    SqliteCommand Accepting(SqliteCommand? command)
+    {
+        if (finished) throw AlreadyFinished();
+        return command ?? throw NotStarted();
+    }
 
     static InvalidOperationException NotStarted() =>
         new("OnScanStarted must be called before any scan events are recorded.");
+
+    static InvalidOperationException AlreadyFinished() =>
+        new("This scan has already been finished. Its row records a census, and " +
+            "anything accepted now would not be part of it. Start a new scan.");
 
     /// <summary>
     /// Commits whatever the scan got through and closes the file. A scan that
@@ -589,28 +765,39 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     /// rows are real and worth keeping, but nothing may treat them as a
     /// complete picture of the device.
     ///
-    /// Two known defects here - findings B2 and B3 in
-    /// docs/INCELEME-SQLITE-2026-09-22.md. The catch below discards up to
-    /// RowsPerTransaction rows without a word, and there is no finally, so a
-    /// Commit that throws anything other than SqliteException skips every
-    /// Dispose beneath it and leaves the file handle and the SQLite lock held -
-    /// which is the "next run finds a locked database" failure CompositeScanSink
-    /// says it exists to prevent.
+    /// If that final commit fails there is nowhere left to save the rows, so
+    /// they are lost - but the number lost is reported, and the cleanup below
+    /// still runs. Both halves matter: a silent loss cannot be investigated,
+    /// and a Dispose that gives up partway leaves the file handle and the
+    /// SQLite lock held, which is the "next run finds a locked database"
+    /// failure CompositeScanSink says it exists to prevent.
     /// </summary>
     public void Dispose()
     {
-        // Not saving is defensible here: there is nowhere left to save it into,
-        // and the scan row still says 'running', so nothing downstream can
-        // mistake the gap for a census. Staying SILENT about it is not - every
-        // other failure in this layer is announced. See finding B2.
-        try { Commit(); }
-        catch (SqliteException) { }
-
-        insertFile?.Dispose();
-        insertFolder?.Dispose();
-        insertSkipped?.Dispose();
-        insertError?.Dispose();
-        transaction?.Dispose();
-        connection.Dispose();
+        try
+        {
+            Commit();
+        }
+        catch (Exception ex)
+        {
+            // Every exception, not just SqliteException: a connection closed
+            // underneath this throws InvalidOperationException, and letting
+            // that escape would skip the cleanup in the finally - turning one
+            // failed commit into a database nobody can open next time.
+            Console.Error.WriteLine(
+                $"[SCAN NOT FULLY RECORDED] The last {rowsSinceCommit} row(s) could not be written to " +
+                $"{DatabasePath} and are lost. The scan is still marked 'running', so nothing will read " +
+                $"it as a complete census - but it is less complete than even that suggests. " +
+                $"Cause: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            insertFile?.Dispose();
+            insertFolder?.Dispose();
+            insertSkipped?.Dispose();
+            insertError?.Dispose();
+            transaction?.Dispose();
+            connection.Dispose();
+        }
     }
 }

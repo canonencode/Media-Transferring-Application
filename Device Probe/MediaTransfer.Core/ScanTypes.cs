@@ -45,11 +45,26 @@ public record DeviceIdentity(
     /// bad, but strictly better than merging two serial-less devices into one
     /// history, which would report the other phone's files as deleted.
     /// </summary>
-    public string DeviceKey =>
-        string.IsNullOrWhiteSpace(SerialNumber) ? WpdId : SerialNumber;
+    public string DeviceKey => TrimmedSerial ?? WpdId;
 
     /// <summary>True when the key is a port-dependent fallback, not a serial.</summary>
-    public bool KeyIsFallback => string.IsNullOrWhiteSpace(SerialNumber);
+    public bool KeyIsFallback => TrimmedSerial is null;
+
+    /// <summary>
+    /// The serial with padding removed, or null when the device supplied none.
+    /// Some MTP stacks pad the value, and "SER123 " keyed separately from
+    /// "SER123" gives one phone two histories - after which a comparison
+    /// against the wrong one reports every file in the other as deleted.
+    ///
+    /// Case is deliberately NOT folded, even though hex serials read as
+    /// case-insensitive. Folding is the merging direction, and merging two
+    /// devices is the worse error: a split history is recoverable, a history
+    /// that has absorbed another phone's files is not. It would also be unsafe
+    /// to do by case alone - ToUpperInvariant maps the Turkish dotless 'ı' onto
+    /// 'I', so two genuinely different serials would collapse into one.
+    /// </summary>
+    public string? TrimmedSerial =>
+        string.IsNullOrWhiteSpace(SerialNumber) ? null : SerialNumber.Trim();
 }
 
 /// <summary>

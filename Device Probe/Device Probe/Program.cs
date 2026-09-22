@@ -720,6 +720,13 @@ if (failedObjects.Count > 0)
             continue;
         }
 
+        // Its properties were readable this time, so the Properties-stage
+        // failure recorded against it during the main walk no longer hides
+        // anything. Separate from the container recovery below: reading an
+        // object's properties and being able to list it are different
+        // questions, and a folder can answer the first and fail the second.
+        tally.MarkObjectResolved(objectId);
+
         string name = retried.Name;
 
         if (retried.IsContainer)
@@ -745,21 +752,36 @@ if (failedObjects.Count > 0)
             {
                 sink.OnFolder(retried, recoveredPath, recovered: true);
             }
+            // PrintTree does not report failure to its caller - it records an
+            // error and returns - so whether the re-walk actually worked has to
+            // be read back out of the tally. Any NEW listing failure logged
+            // against this same object id means the folder still could not be
+            // listed; children log against their own ids and are somebody
+            // else's problem. The abort flag is checked too, because PrintTree
+            // returns immediately and silently when the device has gone.
+            //
+            // This mattered: the old code counted the folder as recovered
+            // regardless, and told the tally so - which erased the fresh
+            // failure along with the original one. A scan that provably lost a
+            // subtree could then print "every folder was listed" and be stored
+            // as status 'complete'.
+            int errorsBeforeRewalk = tally.Errors.Count;
             PrintTree(objectId, recoveredPath);
+
+            bool listedThisTime =
+                Volatile.Read(ref scanAborted) == 0 &&
+                !tally.Errors.Skip(errorsBeforeRewalk).Any(e =>
+                    e.ObjectId == objectId &&
+                    e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext);
+
+            if (!listedThisTime)
+            {
+                stillUnreadable++;
+                continue;
+            }
+
             recoveredFolders++;
 
-            // BUG, known and not yet fixed - finding A3 in
-            // docs/INCELEME-SQLITE-2026-09-22.md. PrintTree can fail without
-            // telling its caller: it returns after recording a fresh error
-            // against this same objectId, or immediately when the abort flag is
-            // set. Control still arrives here, so a folder that could not be
-            // listed twice is counted as recovered AND erased from
-            // SubtreeLosses - which erases the new failure along with the old
-            // one, and can let a scan that provably lost a subtree call itself
-            // COMPLETE. ScanTally's contract says to call this only after a
-            // SUCCESSFUL re-walk; this call site does not honour it. The fix is
-            // for PrintTree to report whether it got through.
-            //
             // Only Enumerate/EnumerateNext failures inflate SubtreeLosses, so
             // only those are worth un-counting here.
             if (stage is ScanStage.Enumerate or ScanStage.EnumerateNext)

@@ -22,6 +22,12 @@ public sealed class ScanTally
     // from where it recorded the failure.
     readonly HashSet<string> recoveredContainers = new();
 
+    // Objects whose PROPERTIES the retry pass managed to read. A different
+    // question from whether a container could be listed, and answered in a
+    // different place, so it gets its own set: an object can have its
+    // properties read and still fail to enumerate.
+    readonly HashSet<string> resolvedObjects = new();
+
     public int MediaFiles { get; private set; }
     public int Documents { get; private set; }
     public int UndeterminedFiles { get; private set; }
@@ -51,6 +57,21 @@ public sealed class ScanTally
         e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext &&
         !recoveredContainers.Contains(e.ObjectId));
 
+    /// <summary>
+    /// Objects whose properties could never be read, so the walk never learned
+    /// their name or even whether they were files or folders - minus the ones
+    /// the retry pass got back.
+    ///
+    /// Not the same as SubtreeLosses, and not harmless. An unresolved object
+    /// that happened to be a folder took its entire contents with it, silently:
+    /// the walk cannot recurse into something it could not identify. That is
+    /// what RetryOutcome.HiddenSubtrees counts, and every one of those is also
+    /// counted here - so a verdict that respects this figure covers them too.
+    /// </summary>
+    public int UnresolvedObjects => errors.Count(e =>
+        e.Stage is ScanStage.Properties &&
+        !resolvedObjects.Contains(e.ObjectId));
+
     public void CountFile(FileKind kind)
     {
         TotalFilesSeen++;
@@ -72,15 +93,22 @@ public sealed class ScanTally
     /// recorded against it no longer hides anything. Safe to call for an id
     /// that never failed, and safe to call twice.
     ///
-    /// PRECONDITION the caller must honour: only after the re-walk actually
-    /// SUCCEEDED. This clears every recorded failure for that id, including one
-    /// recorded moments ago by a re-walk that failed again - so calling it
-    /// optimistically can drive SubtreeLosses to zero for a folder that was
-    /// never listed, and let the scan call itself complete. The retry pass in
-    /// Program.cs currently violates this; see finding A3 in
-    /// docs/INCELEME-SQLITE-2026-09-22.md.
+    /// PRECONDITION: call it only after the re-walk actually SUCCEEDED. This
+    /// clears every recorded failure for that id, including one logged moments
+    /// ago by a re-walk that failed again - so calling it optimistically drives
+    /// SubtreeLosses to zero for a folder that was never listed and lets the
+    /// scan call itself complete. The retry pass used to do exactly that; it
+    /// now checks the tally for a fresh failure before calling this.
     /// </summary>
     public void MarkContainerRecovered(string objectId) => recoveredContainers.Add(objectId);
+
+    /// <summary>
+    /// The retry pass read this object's properties after all, so the earlier
+    /// Properties failure no longer hides anything. Says nothing about whether
+    /// the object could then be LISTED - that is MarkContainerRecovered, and a
+    /// folder can easily answer the first question and not the second.
+    /// </summary>
+    public void MarkObjectResolved(string objectId) => resolvedObjects.Add(objectId);
 
     /// <summary>
     /// Assembles the record the sinks are given. The three arguments are the
@@ -103,6 +131,7 @@ public sealed class ScanTally
             UndeterminedFiles: UndeterminedFiles,
             TotalFilesSeen: TotalFilesSeen,
             SubtreeLosses: SubtreeLosses,
+            UnresolvedObjects: UnresolvedObjects,
             SignatureChecksRun: signatures.ChecksRun,
             CaughtBySignatureOnly: signatures.CaughtBySignatureOnly,
             SignatureCheckErrors: signatures.CheckErrors,

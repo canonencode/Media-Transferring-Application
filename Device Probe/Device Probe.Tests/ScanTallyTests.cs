@@ -170,6 +170,61 @@ public class ScanTallyTests
         Assert.Equal(0, tally.SubtreeLosses);
     }
 
+    // ---- UnresolvedObjects --------------------------------------------------
+
+    [Theory]
+    [InlineData(ScanStage.Properties, 1)]
+    [InlineData(ScanStage.Enumerate, 0)]
+    [InlineData(ScanStage.EnumerateNext, 0)]
+    public void UnresolvedObjects_CountsOnlyPropertyFailures(ScanStage stage, int expected)
+    {
+        // The mirror of SubtreeLosses. A Properties failure means the walk never
+        // learned what the object even was; a listing failure means it knew and
+        // could not open it. Different losses, counted separately, because the
+        // retry pass can fix one without fixing the other.
+        var tally = new ScanTally();
+
+        tally.RecordError(Error("o1", stage));
+
+        Assert.Equal(expected, tally.UnresolvedObjects);
+    }
+
+    [Fact]
+    public void UnresolvedObjects_ExcludesWhatTheRetryPassRead()
+    {
+        var tally = new ScanTally();
+        tally.RecordError(Error("gone", ScanStage.Properties));
+        tally.RecordError(Error("gotBack", ScanStage.Properties));
+
+        Assert.Equal(2, tally.UnresolvedObjects);
+
+        tally.MarkObjectResolved("gotBack");
+
+        Assert.Equal(1, tally.UnresolvedObjects);
+        Assert.Equal(2, tally.Errors.Count);
+    }
+
+    [Fact]
+    public void TheTwoRecoverySets_DoNotStandInForEachOther()
+    {
+        // A folder whose properties were finally readable can still fail to
+        // list, and that is the common case on wedged hardware. If one set
+        // cleared both counts, recovering an object's identity would silently
+        // erase the fact that its contents are still missing.
+        var tally = new ScanTally();
+        tally.RecordError(Error("o1", ScanStage.Properties));
+        tally.RecordError(Error("o1", ScanStage.Enumerate));
+
+        tally.MarkObjectResolved("o1");
+
+        Assert.Equal(0, tally.UnresolvedObjects);
+        Assert.Equal(1, tally.SubtreeLosses);
+
+        tally.MarkContainerRecovered("o1");
+
+        Assert.Equal(0, tally.SubtreeLosses);
+    }
+
     // ---- BuildOutcome -------------------------------------------------------
 
     static SignatureStats Stats() => new(
@@ -195,6 +250,8 @@ public class ScanTallyTests
         tally.CountFile(FileKind.Undetermined);
         tally.CountFile(FileKind.Unknown);
         tally.RecordError(Error("o1", ScanStage.Enumerate));
+        tally.RecordError(Error("o2", ScanStage.Properties));
+        tally.MarkObjectResolved("o2");
 
         var outcome = tally.BuildOutcome(
             completed: true, stalled: false, faulted: false, cameraMode: true,
@@ -209,6 +266,7 @@ public class ScanTallyTests
         Assert.Equal(1, outcome.UndeterminedFiles);
         Assert.Equal(4, outcome.TotalFilesSeen);
         Assert.Equal(1, outcome.SubtreeLosses);
+        Assert.Equal(0, outcome.UnresolvedObjects);
         Assert.Equal(5, outcome.SignatureChecksRun);
         Assert.Equal(2, outcome.CaughtBySignatureOnly);
         Assert.Equal(1, outcome.SignatureCheckErrors);
@@ -257,6 +315,7 @@ public class ScanTallyTests
     [InlineData("CameraMode")]
     [InlineData("UndeterminedFiles")]
     [InlineData("SubtreeLosses")]
+    [InlineData("UnresolvedObjects")]
     public void IsTrustworthy_AnySingleDoubt_MakesItFalse(string field)
     {
         // Deliberately strict. "Mostly complete" is what lets a later
@@ -270,6 +329,7 @@ public class ScanTallyTests
             "CameraMode" => Clean() with { CameraMode = true },
             "UndeterminedFiles" => Clean() with { UndeterminedFiles = 1 },
             "SubtreeLosses" => Clean() with { SubtreeLosses = 1 },
+            "UnresolvedObjects" => Clean() with { UnresolvedObjects = 1 },
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, null)
         };
 

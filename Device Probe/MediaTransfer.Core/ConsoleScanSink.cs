@@ -132,6 +132,7 @@ public sealed class ConsoleScanSink : IScanSink
         if (outcome.Faulted) Console.WriteLine("  - the scan stopped on an error");
         if (outcome.CameraMode) Console.WriteLine("  - the phone was in camera (PTP) mode, which hides videos and documents");
         if (outcome.SubtreeLosses > 0) Console.WriteLine($"  - {outcome.SubtreeLosses} folder(s) could not be listed, losing everything beneath them");
+        if (outcome.UnresolvedObjects > 0) Console.WriteLine($"  - {outcome.UnresolvedObjects} object(s) could not be identified at all, so any that were folders took their contents with them");
         if (outcome.UndeterminedFiles > 0) Console.WriteLine($"  - {outcome.UndeterminedFiles} file(s) were never examined (listed above as [UNCHECKED])");
     }
 

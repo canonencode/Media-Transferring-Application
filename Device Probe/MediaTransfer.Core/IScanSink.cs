@@ -76,6 +76,11 @@ public interface IScanSink
 /// Files whose type could not be established because the content read was
 /// unavailable. Not "not media" - simply never looked at.
 /// </param>
+/// <param name="UnresolvedObjects">
+/// Objects whose properties could not be read at all, so the walk never learned
+/// what they were, minus any the retry pass got back. An unresolved object that
+/// was a folder took its whole subtree with it.
+/// </param>
 /// <param name="SubtreeLosses">
 /// Failures while LISTING a folder, excluding any the retry pass later walked
 /// successfully. Each remaining one lost an unknown number of files beneath
@@ -112,6 +117,7 @@ public record ScanOutcome(
     int UndeterminedFiles,
     int TotalFilesSeen,
     int SubtreeLosses,
+    int UnresolvedObjects,
     int SignatureChecksRun,
     int CaughtBySignatureOnly,
     int SignatureCheckErrors,
@@ -125,23 +131,16 @@ public record ScanOutcome(
     /// partial, because "mostly complete" is what lets a store conclude that
     /// files it never looked at have been deleted from the phone.
     ///
-    /// INCOMPLETE, known and not yet fixed - finding A4 in
-    /// docs/INCELEME-SQLITE-2026-09-22.md. Two kinds of loss get past it:
-    ///
-    /// - Properties-stage errors. ScanTally.SubtreeLosses counts only
-    ///   Enumerate/EnumerateNext, but a Properties failure loses one object
-    ///   AND its subtree when that object was a folder - which is what
-    ///   ConsoleScanSink prints about it. ScanOutcome carries no error count
-    ///   at all, so nothing here can see them.
-    /// - RetryOutcome.HiddenSubtrees, documented as folders whose entire
-    ///   contents were silently lost. It is stored on the scan row and never
-    ///   reaches this predicate.
-    ///
-    /// So a scan can satisfy this and still have lost photographs. The console
-    /// at least prints the error breakdown underneath; the database qualifies
-    /// its status with nothing.
+    /// UnresolvedObjects is in here for a reason that took a review to spot.
+    /// SubtreeLosses counts only failures to LIST a folder, so a scan whose
+    /// objects could not be identified at all - 1,440 of them on one measured
+    /// run - satisfied every other condition and was written as 'complete'.
+    /// Any of those could have been a folder, and a folder that was never
+    /// identified was never walked. RetryOutcome.HiddenSubtrees counts the ones
+    /// proven to be folders, and all of them are unresolved objects too, so
+    /// this single condition covers that case as well.
     /// </summary>
     public bool IsTrustworthy =>
         Completed && !Stalled && !Faulted && !CameraMode &&
-        UndeterminedFiles == 0 && SubtreeLosses == 0;
+        UndeterminedFiles == 0 && SubtreeLosses == 0 && UnresolvedObjects == 0;
 }
