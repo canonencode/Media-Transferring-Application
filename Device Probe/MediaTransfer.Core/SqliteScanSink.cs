@@ -33,7 +33,20 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     // 'running', so the gap is never mistaken for a complete census.
     const int RowsPerTransaction = 1000;
 
+    /// <summary>
+    /// Scans kept per device before the oldest are deleted. Every scan stores a
+    /// full snapshot - 13,791 rows and roughly 4.3 MB on the phone this was
+    /// built against - so without a limit a daily scan costs about 1.5 GB a
+    /// year to record a handful of changed files.
+    ///
+    /// Ten is enough to see a week of history and to compare a suspicious scan
+    /// against several earlier ones. Pass 0 to keep everything.
+    /// </summary>
+    public const int DefaultRetainedScansPerDevice = 10;
+
     readonly SqliteConnection connection;
+    readonly int retainedScansPerDevice;
+    string? deviceKey;
     SqliteTransaction? transaction;
     SqliteCommand? insertFile;
     SqliteCommand? insertFolder;
@@ -52,9 +65,19 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     /// <summary>The row this scan is being written to, or 0 before it starts.</summary>
     public long ScanId { get; private set; }
 
-    public SqliteScanSink(string? databasePath = null)
+    /// <summary>
+    /// Scans deleted by the retention rule when this one finished. Empty when
+    /// nothing was old enough. Reported rather than returned quietly: this is
+    /// the user's own scan history being removed, and housekeeping that happens
+    /// invisibly is how a tool loses data nobody asked it to lose.
+    /// </summary>
+    public IReadOnlyList<long> PrunedScanIds => prunedScanIds;
+    readonly List<long> prunedScanIds = new();
+
+    public SqliteScanSink(string? databasePath = null, int retainedScansPerDevice = DefaultRetainedScansPerDevice)
     {
         DatabasePath = databasePath ?? DefaultDatabasePath;
+        this.retainedScansPerDevice = retainedScansPerDevice;
 
         string? folder = Path.GetDirectoryName(Path.GetFullPath(DatabasePath));
         if (!string.IsNullOrEmpty(folder))
@@ -190,10 +213,19 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         CREATE INDEX IF NOT EXISTS ix_file_scan_kind ON file(scan_id, kind);
         CREATE INDEX IF NOT EXISTS ix_folder_scan_path ON folder(scan_id, path);
         CREATE INDEX IF NOT EXISTS ix_scan_device ON scan(device_key, started_utc);
+
+        -- SQLite does not index a foreign key for you, and these two are read
+        -- and deleted per scan. Without them, pruning one old scan scans both
+        -- tables end to end. (CREATE INDEX IF NOT EXISTS does apply to an
+        -- existing database, unlike an added column - see the user_version note
+        -- above for the case that does not.)
+        CREATE INDEX IF NOT EXISTS ix_scan_error_scan ON scan_error(scan_id);
+        CREATE INDEX IF NOT EXISTS ix_skipped_folder_scan ON skipped_folder(scan_id);
         """;
 
     public void OnScanStarted(DeviceIdentity device, bool cameraMode)
     {
+        deviceKey = device.DeviceKey;
         string now = Timestamp();
 
         // first_seen_utc is preserved on conflict; last_seen_utc is not. The
@@ -411,6 +443,82 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         // loudly; the call that can least afford to fail quietly is the one
         // that does. Treating a row count other than 1 as an error fixes it.
         update.ExecuteNonQuery();
+
+        Prune();
+    }
+
+    /// <summary>
+    /// Deletes this device's oldest scans, keeping the most recent
+    /// <see cref="retainedScansPerDevice"/> of them.
+    ///
+    /// Runs after the status update, not before it, so the scan that just
+    /// finished is already one of the ones being counted as recent - otherwise
+    /// a retention of 1 would delete the scan it was called from.
+    ///
+    /// Three things it will not delete, each for a reason that cost something
+    /// to learn:
+    ///
+    /// - A scan still marked 'running'. Another process may be writing it right
+    ///   now; its rows are not history, they are in flight. (This does mean a
+    ///   scan killed mid-walk is never pruned, because nothing yet marks a
+    ///   stale 'running' row abandoned - finding E3.)
+    /// - The newest 'complete' scan, even when it falls outside the retained
+    ///   window. A phone that keeps wedging produces a run of partial scans,
+    ///   and counting alone would quietly delete the last full census of the
+    ///   device - which is the one row everything downstream depends on.
+    /// - Anything at all when retention is zero or negative, which means keep
+    ///   everything.
+    ///
+    /// Another device's scans are never touched: the window is per device, so
+    /// scanning one phone ten times cannot evict another phone's history.
+    /// </summary>
+    void Prune()
+    {
+        prunedScanIds.Clear();
+        if (retainedScansPerDevice <= 0 || deviceKey is null) return;
+
+        using var doomed = connection.CreateCommand();
+        doomed.CommandText = """
+            SELECT scan_id FROM scan
+            WHERE device_key = $key
+              AND status <> 'running'
+              AND scan_id NOT IN (
+                  SELECT scan_id FROM scan
+                  WHERE device_key = $key AND status <> 'running'
+                  ORDER BY scan_id DESC LIMIT $keep)
+              AND scan_id IS NOT (
+                  SELECT MAX(scan_id) FROM scan
+                  WHERE device_key = $key AND status = 'complete')
+            ORDER BY scan_id;
+            """;
+        doomed.Parameters.AddWithValue("$key", deviceKey);
+        doomed.Parameters.AddWithValue("$keep", retainedScansPerDevice);
+
+        var ids = new List<long>();
+        using (var reader = doomed.ExecuteReader())
+        {
+            while (reader.Read()) ids.Add(reader.GetInt64(0));
+        }
+        if (ids.Count == 0) return;
+
+        // One transaction for the whole sweep: a half-pruned scan would leave
+        // file rows pointing at a scan row that no longer exists, which is the
+        // one shape of corruption the foreign key is there to prevent.
+        using var sweep = connection.BeginTransaction();
+        foreach (long id in ids)
+        {
+            // Children before the parent, or the foreign key refuses.
+            foreach (string table in new[] { "file", "folder", "skipped_folder", "scan_error", "scan" })
+            {
+                using var delete = connection.CreateCommand();
+                delete.Transaction = sweep;
+                delete.CommandText = $"DELETE FROM {table} WHERE scan_id = $id;";
+                delete.Parameters.AddWithValue("$id", id);
+                delete.ExecuteNonQuery();
+            }
+        }
+        sweep.Commit();
+        prunedScanIds.AddRange(ids);
     }
 
     void BeginBatch()

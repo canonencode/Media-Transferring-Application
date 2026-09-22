@@ -236,7 +236,7 @@ int signatureCheckErrors = 0;
 // about where its time went.
 bool recordingDisabled = Environment.GetEnvironmentVariable("PROBE_NO_DB") == "1";
 
-IScanSink? sqliteSink = null;
+SqliteScanSink? sqliteSink = null;
 if (recordingDisabled)
 {
     Console.WriteLine("PROBE_NO_DB=1: this scan will not be recorded.");
@@ -606,6 +606,16 @@ finally
             stalled: stallDetected,
             faulted: scanFaulted));
     }
+}
+
+// Last, after the summary, because it is housekeeping rather than a finding -
+// but said out loud all the same. This is the user's own scan history being
+// deleted, and a tool that removes data quietly is a tool nobody can audit.
+if (sqliteSink is { PrunedScanIds.Count: > 0 } pruned)
+{
+    Console.WriteLine($"\nRetention: removed {pruned.PrunedScanIds.Count} older scan(s) of this device " +
+        $"(#{string.Join(", #", pruned.PrunedScanIds)}), keeping the most recent " +
+        $"{SqliteScanSink.DefaultRetainedScansPerDevice} and the newest complete one.");
 }
 
 void RunRetryPass()

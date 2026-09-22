@@ -568,4 +568,191 @@ public class SqliteScanSinkTests
         // snapshots, not one table being overwritten.
         Assert.Equal(3, db.Count("(SELECT DISTINCT scan_id FROM file)"));
     }
+
+    // ---- Retention ----------------------------------------------------------
+    //
+    // Every scan stores a full snapshot, so without a limit a daily scan of one
+    // phone costs about 1.5 GB a year to record a handful of changed files.
+    // These tests exist because the cure deletes the user's own history, and the
+    // rules about what it must NOT delete are the whole of its correctness.
+
+    static (long ScanId, long[] Pruned) RunScan(
+        TempDatabase db, int retain, DeviceIdentity device, ScanOutcome outcome, int files = 1)
+    {
+        using var sink = new SqliteScanSink(db.Path, retain);
+        sink.OnScanStarted(device, cameraMode: outcome.CameraMode);
+        for (int i = 0; i < files; i++)
+        {
+            sink.OnFile(FileObject($"f{i}.jpg"), $"/P/f{i}.jpg", FileKind.MediaFile, recovered: false);
+        }
+        sink.OnFolder(FolderObject("DCIM"), "/P/DCIM", recovered: false);
+        sink.OnFolderSkipped("/P/.thumbnails", "cache");
+        sink.OnError(new ScanError("o1", "/P", ScanStage.Properties, 1, "x"));
+        sink.OnScanFinished(outcome);
+        return (sink.ScanId, sink.PrunedScanIds.ToArray());
+    }
+
+    [Fact]
+    public void ScansBeyondTheWindow_AreDeletedWithEveryRowTheyOwned()
+    {
+        using var db = new TempDatabase();
+        for (int i = 0; i < 5; i++) RunScan(db, retain: 3, Device(), CleanOutcome());
+
+        Assert.Equal(3, db.Count("scan"));
+        // Not just the scan row: a scan's files, folders, skips and errors go
+        // with it, or the database keeps paying for history it no longer has.
+        foreach (string table in new[] { "file", "folder", "skipped_folder", "scan_error" })
+        {
+            Assert.Equal(3, db.Count($"(SELECT DISTINCT scan_id FROM {table})"));
+        }
+        Assert.Equal(new[] { "3", "4", "5" }, db.Column("SELECT scan_id FROM scan ORDER BY scan_id"));
+    }
+
+    [Fact]
+    public void PruningLeavesNoRowPointingAtAScanThatIsGone()
+    {
+        using var db = new TempDatabase();
+        for (int i = 0; i < 6; i++) RunScan(db, retain: 2, Device(), CleanOutcome());
+
+        foreach (string table in new[] { "file", "folder", "skipped_folder", "scan_error" })
+        {
+            Assert.Equal(0, db.Count(table, $"scan_id NOT IN (SELECT scan_id FROM scan)"));
+        }
+    }
+
+    [Fact]
+    public void TheNewestCompleteScan_SurvivesEvenWhenItFallsOutsideTheWindow()
+    {
+        // The case that makes counting alone wrong: a phone that keeps wedging
+        // produces a run of partial scans, and evicting by age would quietly
+        // delete the last full census of the device - the one row everything
+        // downstream depends on.
+        using var db = new TempDatabase();
+        var (completeId, _) = RunScan(db, retain: 2, Device(), CleanOutcome());
+        for (int i = 0; i < 5; i++)
+        {
+            RunScan(db, retain: 2, Device(), CleanOutcome() with { Completed = false, Stalled = true });
+        }
+
+        Assert.Equal(1, db.Count("scan", $"scan_id = {completeId} AND status = 'complete'"));
+        // Kept in ADDITION to the window, not instead of one of its slots.
+        Assert.Equal(3, db.Count("scan"));
+    }
+
+    [Fact]
+    public void WithNoCompleteScanAtAll_PruningStillWorks()
+    {
+        // Pins a SQL subtlety, not a policy. The "keep the newest complete one"
+        // clause compares against a subquery that returns NULL when the device
+        // has never completed a scan. Written with `<>` that comparison yields
+        // NULL for every row, which SQLite treats as false in a WHERE clause -
+        // so nothing would ever be pruned and the database would grow forever
+        // on exactly the phone that scans worst. `IS NOT` gives the right
+        // answer against NULL, and this test is what says so out loud.
+        using var db = new TempDatabase();
+        for (int i = 0; i < 5; i++)
+        {
+            RunScan(db, retain: 2, Device(), CleanOutcome() with { Completed = false, Stalled = true });
+        }
+
+        Assert.Equal(0, db.Count("scan", "status = 'complete'"));
+        Assert.Equal(2, db.Count("scan"));
+    }
+
+    [Fact]
+    public void AScanStillMarkedRunning_IsNeverPruned()
+    {
+        // Another process may be writing it right now; those rows are not
+        // history, they are in flight.
+        using var db = new TempDatabase();
+        using (var abandoned = new SqliteScanSink(db.Path))
+        {
+            abandoned.OnScanStarted(Device(), cameraMode: false);
+            abandoned.OnFile(FileObject("a.jpg"), "/P/a.jpg", FileKind.MediaFile, recovered: false);
+            // No OnScanFinished: still 'running'.
+        }
+
+        for (int i = 0; i < 6; i++) RunScan(db, retain: 2, Device(), CleanOutcome());
+
+        Assert.Equal(1, db.Count("scan", "status = 'running'"));
+        Assert.Equal(1, db.Count("file", "scan_id = 1"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ARetentionOfZeroOrLess_KeepsEverything(int retain)
+    {
+        using var db = new TempDatabase();
+        for (int i = 0; i < 5; i++) RunScan(db, retain, Device(), CleanOutcome());
+
+        Assert.Equal(5, db.Count("scan"));
+    }
+
+    [Fact]
+    public void ARetentionOfOne_DoesNotDeleteTheScanItWasCalledFrom()
+    {
+        // Pruning runs after the status update, so the scan that just finished
+        // is already inside the window it is being measured against. Running it
+        // first would delete the scan doing the pruning.
+        using var db = new TempDatabase();
+        var (lastId, _) = RunScan(db, retain: 1, Device(), CleanOutcome());
+        for (int i = 0; i < 3; i++) (lastId, _) = RunScan(db, retain: 1, Device(), CleanOutcome());
+
+        Assert.Equal(1, db.Count("scan"));
+        Assert.Equal(1, db.Count("scan", $"scan_id = {lastId} AND status = 'complete'"));
+        Assert.Equal(1, db.Count("file", $"scan_id = {lastId}"));
+    }
+
+    [Fact]
+    public void OneDevicesHistory_CannotEvictAnothers()
+    {
+        // The window is per device. Scanning one phone repeatedly must not cost
+        // a phone that has not been connected for a month its entire history.
+        using var db = new TempDatabase();
+        var other = Device("OTHER-SERIAL");
+        RunScan(db, retain: 2, other, CleanOutcome());
+
+        for (int i = 0; i < 6; i++) RunScan(db, retain: 2, Device(), CleanOutcome());
+
+        Assert.Equal(1, db.Count("scan", "device_key = 'OTHER-SERIAL'"));
+        Assert.Equal(2, db.Count("scan", "device_key = 'SER123'"));
+        Assert.Equal(2, db.Count("device"));
+    }
+
+    [Fact]
+    public void WhatWasPruned_IsReportedRatherThanDoneQuietly()
+    {
+        // Housekeeping that removes data invisibly is housekeeping nobody can
+        // audit. The scanner prints this line.
+        using var db = new TempDatabase();
+        for (int i = 0; i < 3; i++)
+        {
+            var (_, pruned) = RunScan(db, retain: 3, Device(), CleanOutcome());
+            Assert.Empty(pruned);
+        }
+
+        var (_, prunedNow) = RunScan(db, retain: 3, Device(), CleanOutcome());
+
+        Assert.Equal(new long[] { 1 }, prunedNow);
+        Assert.Equal(0, db.Count("scan", "scan_id = 1"));
+    }
+
+    [Fact]
+    public void TheDefaultRetention_IsTenScansPerDevice()
+    {
+        // Pinned because it is the number that decides how much disk the tool
+        // costs a user, and changing it silently changes that.
+        Assert.Equal(10, SqliteScanSink.DefaultRetainedScansPerDevice);
+
+        using var db = new TempDatabase();
+        for (int i = 0; i < 12; i++)
+        {
+            using var sink = new SqliteScanSink(db.Path);
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnScanFinished(CleanOutcome());
+        }
+
+        Assert.Equal(10, db.Count("scan"));
+    }
 }
