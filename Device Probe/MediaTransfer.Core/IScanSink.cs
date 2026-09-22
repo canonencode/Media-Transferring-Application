@@ -1,3 +1,5 @@
+﻿namespace MediaTransfer.Core;
+
 /// <summary>
 /// Where a scan's findings go. The walk reports to one of these instead of
 /// writing to the console, which is the seam the whole next milestone depends
@@ -8,7 +10,7 @@
 /// sink that wants indentation can derive it and one that wants rows does not
 /// have to care about depth at all.
 /// </summary>
-interface IScanSink
+public interface IScanSink
 {
     /// <summary>Called once before the walk begins.</summary>
     void OnScanStarted(string deviceId, string friendlyName, bool cameraMode);
@@ -59,7 +61,7 @@ interface IScanSink
 /// Failures while LISTING a folder. Each one lost an unknown number of files
 /// beneath that point, so anything under those paths is unproven.
 /// </param>
-record ScanOutcome(
+public record ScanOutcome(
     bool Completed,
     bool Stalled,
     bool Faulted,

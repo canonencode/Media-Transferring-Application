@@ -1,3 +1,5 @@
+﻿namespace MediaTransfer.Core;
+
 /// <summary>
 /// The two reasons a folder is not worth walking. Kept in one place so the
 /// main walk and the retry pass can never disagree about them - they did once,
@@ -5,7 +7,7 @@
 ///
 /// Pure: takes strings, returns a decision. No COM, no device.
 /// </summary>
-static class FolderPolicy
+public static class FolderPolicy
 {
     // Folders holding only DERIVED copies of files that are scanned elsewhere.
     // Measured on an A56: .thumbnails alone held 7,955 of the 17,478 files a
@@ -33,6 +35,23 @@ static class FolderPolicy
     /// the full accumulated path of the folder's parent, not just its name:
     /// matching on the bare name meant any folder called "Android" anywhere in
     /// the tree silently lost its data/obb children.
+    ///
+    /// Matches names EXACTLY - no trimming of trailing spaces or dots, unlike
+    /// FileClassifier, which does trim them. The difference is deliberate, and
+    /// it comes from what each one costs when it is wrong.
+    ///
+    /// Skipping a folder means never looking inside it. If the device ever
+    /// hands back ".thumbnails " with a trailing space, an exact match fails to
+    /// recognise it and the folder gets walked: some wasted time on a cache
+    /// nobody wanted. Trimming would recognise it - and would also silently
+    /// skip a real album someone happened to name that way, taking every photo
+    /// in it out of the scan with no error and no mention.
+    ///
+    /// So this fails OPEN on purpose: when the name is not exactly a known one,
+    /// walk it. Over-scanning costs seconds; under-scanning costs photographs,
+    /// and not losing photographs silently is what this whole project is for.
+    /// FileClassifier can afford to trim because it only decides what a file
+    /// IS - getting that wrong does not remove anything from the results.
     /// </summary>
     public static bool ShouldSkip(string parentPath, string name, out string reason)
     {

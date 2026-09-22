@@ -1,3 +1,5 @@
+﻿namespace MediaTransfer.Core;
+
 /// <summary>
 /// What a scanned file turned out to be.
 ///
@@ -6,7 +8,7 @@
 /// test project can therefore compile the classifier and this enum on their
 /// own, without dragging in the WPD interop that Program.cs needs.
 /// </summary>
-enum FileKind
+public enum FileKind
 {
     /// <summary>
     /// Checked, and it is not media. A real answer, deliberately distinct from

@@ -201,15 +201,21 @@ var folderType = new Guid(0x27E2E392, 0xA111, 0x48E0, 0xAB, 0x0C, 0xE1, 0x77, 0x
 // something we need to step into to reach the real folders underneath.
 var functionalObjectType = new Guid(0x99ED0160, 0x17FF, 0x4C44, 0x9D, 0x98, 0x1D, 0x7A, 0x6F, 0x94, 0x19, 0x21);
 
-// PRE-SQLITE: caughtBySignatureOnly and signatureChecksActuallyRun become a
-// file.classified_by column plus a COUNT query; both counters go.
+// PRE-SQLITE: both counters become COUNT queries over a file.classified_by
+// column - but that column cannot be filled yet. OnFile reports WHAT a file is,
+// never HOW that was decided, so the sink has no way to tell an extension match
+// from a signature match. Adding the column means adding that argument first.
 int caughtBySignatureOnly = 0;
 int signatureChecksActuallyRun = 0;
-// PRE-SQLITE: signatureCheckErrors does TWO jobs. As a summary statistic it goes
-// (a scan_error row, stage=Stream, replaces it). As the circuit breaker's error
-// signal - the errorsBefore/after snapshot in CheckSignatureWithHealthMonitoring -
-// it stays, but should become a bool returned by DetectKindBySignature rather
-// than a global that the caller diffs.
+// PRE-SQLITE: signatureCheckErrors does TWO jobs and only one of them goes.
+//
+// As a summary statistic it becomes a scan_error row - which needs a Stream
+// member added to ScanStage (there is none today) and a sink.OnError call from
+// DetectKindBySignature's catch, which currently reports nothing at all.
+//
+// As the circuit breaker's error signal it STAYS, but the mechanism should
+// change: DetectKindBySignature returning a bool instead of the caller diffing
+// a global before and after the call.
 int signatureCheckErrors = 0;
 
 // The walk no longer prints anything. It reports to a sink, which is what lets
@@ -234,16 +240,33 @@ var failedObjects = new List<(string ObjectId, string Path, ScanStage Stage)>();
 // the double-counting bug: the main walk claimed an object's ID before it knew
 // whether the object was even readable, while the retry pass classified that
 // same object through a path that never consulted the set.
-// PRE-SQLITE: classifiedObjectIds goes. A UNIQUE(device_id, path) constraint with
-// upsert makes writing the same file twice idempotent, so the retry re-walk no
-// longer needs an in-memory guard. walkedContainerIds STAYS - it breaks cycles
-// during the walk itself, where a database cannot help.
+// NOT pre-SQLite, despite appearances. An upsert on UNIQUE(device_id, path)
+// would make a duplicate WRITE harmless, but the set also stops the walk from
+// re-reading an object it has already handled - and that guard sits in front of
+// GetObjectInfo and the signature check, both of which are device round trips.
+// A database cannot prevent work that happens before the row is ever produced.
+// walkedContainerIds is the same story plus cycle-breaking.
 var classifiedObjectIds = new HashSet<string>();  // files already counted
 var walkedContainerIds = new HashSet<string>();   // folders already enumerated; also breaks cycles
 
 // Guards CloseSession(), which is reachable from three places at once. An int
 // rather than a bool because Interlocked has no bool overload.
 int sessionClosed = 0;
+
+// Same guard for the verdict. The watchdog reports just before FailFast, and
+// the main thread reports in its finally; if the scan unwedges in the moments
+// between the watchdog's Wait timing out and the process dying, both fire.
+// Beyond the duplicate output, the two threads would be reading the sink's
+// plain List<ScanError> at the same time as the scan thread appends to it.
+int outcomeReported = 0;
+
+// PRE-SQLITE: becomes "resolved" on the scan_error row; this set goes.
+// Folders that failed to list during the main walk but were successfully
+// re-walked by the retry pass. Without this the verdict kept reporting them as
+// lost - "N folder(s) could not be listed, losing everything beneath them" -
+// even though the retry had listed them and their files are in the results.
+// Wrong in the safe direction, but a verdict the user cannot act on or trust.
+var recoveredContainerIds = new HashSet<string>();
 
 // Watchdog state. Declared up here because the tree walk writes to it and is
 // handed to Task.Run before the watchdog itself is built.
@@ -255,7 +278,11 @@ bool scanFaulted = false;
 // have no bool overloads; 1 means "stop walking, the device is gone".
 int scanAborted = 0;
 
-// PRE-SQLITE: becomes a scan_error row (stage=Properties, informational); this counter goes.
+// PRE-SQLITE: the counter goes, but NOT into scan_error. A missing optional
+// property is absence, not failure - the same reason TryReadString does not
+// report one - and a row in the error table would pollute the "lost one object"
+// group with objects that were read perfectly well. It is already derivable
+// from the file row: a NULL size or date on a non-container IS the miss.
 // Counts a FILE lacking a property the device otherwise supplies for every file.
 // Containers are excluded on purpose: the storage root has no filename, size or
 // modified date, and counting it produced a constant "3 errors" on every scan
@@ -265,6 +292,9 @@ int filePropertyMisses = 0;
 
 
 string? serialNumber = ReadDeviceString(serialKey);
+// PRE-SQLITE: these three are the device table's columns, and printing them is
+// all that happens to them today - OnScanStarted only receives deviceId and
+// friendlyName. A SqliteScanSink keyed on the serial cannot see the serial.
 Console.WriteLine($"Serial number: {serialNumber ?? "(not supplied)"}");
 Console.WriteLine($"Manufacturer/model: {ReadDeviceString(manufacturerKey) ?? "?"} / {ReadDeviceString(modelKey) ?? "?"}");
 
@@ -290,7 +320,22 @@ Console.WriteLine("Connected to device. Scanning file tree...\n");
 // a finally block, Ctrl+C - skipped device.Close() and left the session locked,
 // which is precisely the bug that costs the NEXT run its signature checks.
 AppDomain.CurrentDomain.ProcessExit += (_, _) => CloseSession();
-Console.CancelKeyPress += (_, _) => CloseSession();
+
+// Ctrl+C does NOT close the session itself, deliberately. The handler runs on a
+// thread-pool thread while the scan thread is very likely inside a COM call, so
+// releasing the objects here is the same use-after-release hazard the timeout
+// path was rewritten to avoid: worst case an access violation inside
+// PortableDeviceApi.dll, which .NET cannot catch. Instead it does what the
+// watchdog does - raise the abort flag so the walk stops at the next object,
+// ask the device to cancel whatever is in flight, and cancel the termination so
+// the main thread's finally can close the session on a thread that is idle.
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    Volatile.Write(ref scanAborted, 1);
+    Console.WriteLine("\n[CANCELLED] Stopping the scan. Partial results will be reported below.");
+    try { device.Cancel(); } catch (Exception) { }
+};
 
 var scanTask = Task.Run(() =>
 {
@@ -342,8 +387,13 @@ var watchdog = new Thread(() =>
         // this scan is not one long operation but ~14,500 tiny ones. Cancelling
         // the current call just makes that one call fail; the loop moves to the
         // next object. Something has to tell the LOOP to stop.
-        Volatile.Write(ref scanAborted, 1);
+        // stallDetected is written BEFORE the Volatile.Write, not after. A plain
+        // bool has no ordering guarantee of its own; publishing it ahead of the
+        // volatile store means any thread that observes scanAborted==1 also sees
+        // stallDetected==true. Written the other way round there is no formal
+        // happens-before edge to the read that builds ScanOutcome.
         stallDetected = true;
+        Volatile.Write(ref scanAborted, 1);
 
         Console.WriteLine($"\n[WARNING] No progress for {stallSeconds} seconds. The device has stopped " +
             "responding mid-scan - this is a wedged MTP session, not a slow one. Abandoning the walk so the " +
@@ -357,7 +407,13 @@ var watchdog = new Thread(() =>
 
         // Still worth calling: it can unblock a thread already stuck inside a
         // COM call, which the flag on its own cannot reach.
-        try { device.Cancel(); } catch (System.Runtime.InteropServices.COMException) { }
+        //
+        // Catches Exception, not just COMException. On a soft stall the walk can
+        // unwind in milliseconds, the main thread's finally then releases the
+        // device, and this call lands on a severed RCW - which throws
+        // InvalidComObjectException, not a COMException. Unhandled on a plain
+        // Thread that kills the process.
+        try { device.Cancel(); } catch (Exception) { }
 
         // ESCALATION, and the reason this is not just a nicety: measured on a
         // real wedge, the scan thread was blocked INSIDE a COM call at 0.00s
@@ -369,7 +425,15 @@ var watchdog = new Thread(() =>
         // So: give it a short grace period to unwind, and if it does not,
         // leave. Waiting out the 30-minute overall timeout is not a safety
         // net, it is a hang with a longer name.
-        if (!scanTask.Wait(20_000))
+        // Wait rethrows the task's AggregateException if the scan faulted
+        // inside the grace window. Unhandled on a plain Thread that kills the
+        // process before the main thread's finally can close the session or
+        // report - so a fault is treated as "it stopped", which is true.
+        bool unwound;
+        try { unwound = scanTask.Wait(20_000); }
+        catch (AggregateException) { unwound = true; }
+
+        if (!unwound)
         {
             Console.WriteLine("[FATAL] The device is not responding and the scan thread cannot be recovered - " +
                 "it is blocked inside a driver call that ignored Cancel(). Exiting now rather than waiting. " +
@@ -382,15 +446,19 @@ var watchdog = new Thread(() =>
             // "Here is what I found and it is incomplete" is a far better
             // answer than silence, and silence is exactly the failure this
             // project exists to prevent.
+            if (Interlocked.Exchange(ref outcomeReported, 1) == 0)
+            {
             sink.OnScanFinished(new ScanOutcome(
                 Completed: false,
                 Stalled: true,
                 Faulted: false,
                 CameraMode: cameraMode,
                 UndeterminedFiles: sink.UndeterminedFiles,
-                SubtreeLosses: sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext)));
+                SubtreeLosses: sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext
+                                       && !recoveredContainerIds.Contains(e.ObjectId))));
             Console.WriteLine($"Found before the device stopped answering: {sink.MediaFiles} media file(s) " +
                 $"and {sink.Documents} document(s) out of {sink.TotalFilesSeen} file(s) seen.");
+            }
             Console.Out.Flush();
             Environment.FailFast("WPD scan thread unrecoverable: wedged inside a COM call, Cancel() ignored.");
         }
@@ -399,45 +467,18 @@ var watchdog = new Thread(() =>
 }) { IsBackground = true, Name = "wpd-stall-watchdog" };
 watchdog.Start();
 
-const int overallScanTimeoutMs = 30 * 60 * 1000;
+// No overall timeout here any more. There used to be a 30-minute one that
+// called Cancel() without raising the abort flag - a stale copy of the
+// watchdog written before we measured that Cancel() alone stops nothing. It
+// could only ever fire on a scan that was PROGRESSING for over 30 minutes
+// (the watchdog catches a wedge in 65 seconds), and it would then kill that
+// healthy scan with no summary at all. Two mechanisms for one job means a
+// standing debt to keep them in step, and that debt is exactly what produced
+// the bug. The watchdog is the single mechanism now.
 try
 {
-    // Task.Wait(int) throws the task's own AggregateException immediately if
-    // it faults within the timeout window - it does NOT return true and let a
-    // fault be discovered afterwards.
-    if (!scanTask.Wait(overallScanTimeoutMs))
-    {
-        Console.WriteLine($"\n[WARNING] The scan has not finished after {overallScanTimeoutMs / 60000} minutes " +
-            "and looks genuinely stuck (not just slow - every real scan so far has finished well within this). " +
-            "Asking the device to cancel the in-flight operation.");
-
-        // DO NOT release the COM objects from this thread. The scan thread may
-        // still be inside a live call on them, and the CLR does not hold a
-        // reference for the duration of a call - dropping the last reference
-        // under a running call can destroy the object mid-use. Best case that
-        // throws InvalidComObjectException; worst case it's an access violation
-        // inside PortableDeviceApi.dll, which since .NET 4.0 is NOT deliverable
-        // as a catchable managed exception, so the try/catch that used to wrap
-        // this could never have helped.
-        //
-        // WPD provides the correct tool: Cancel() is documented as callable
-        // from another thread to abort operations in flight. The blocked call
-        // then returns an error, the scan thread unwinds normally, and cleanup
-        // happens on that thread where nothing is in flight.
-        try { device.Cancel(); } catch (System.Runtime.InteropServices.COMException) { }
-
-        if (!scanTask.Wait(10_000))
-        {
-            // The device ignored Cancel() and the thread is still wedged inside
-            // a COM call. There is no safe way to release these objects now, and
-            // Environment.Exit would run a graceful CLR shutdown that can itself
-            // block on the stuck apartment. Leave immediately instead; the OS
-            // reclaims the session when the process dies.
-            Console.WriteLine("[FATAL] The device did not respond to Cancel(). Exiting immediately without " +
-                "touching the device session. Unplug/replug the phone before the next run.");
-            Environment.FailFast("WPD scan thread wedged inside a COM call after Cancel() was ignored.");
-        }
-    }
+    // Task.Wait() throws the task's own AggregateException if the scan faulted.
+    scanTask.Wait();
 }
 catch (AggregateException ex)
 {
@@ -457,23 +498,35 @@ finally
     // to distinguish a complete census from a scan the watchdog cut short -
     // and a store that records a partial scan as complete will later conclude
     // that everything it did not see has been deleted from the phone.
+    // PRE-SQLITE: the outcome is assembled by reading ConsoleScanSink's own
+    // properties, which is why `sink` is declared as the concrete type rather
+    // than IScanSink. Nothing here compiles against the interface, so a second
+    // implementation cannot be dropped in. The walk needs to keep these two
+    // figures itself before that is possible.
+    if (Interlocked.Exchange(ref outcomeReported, 1) == 0)
     sink.OnScanFinished(new ScanOutcome(
-        Completed: scanTask.IsCompletedSuccessfully,
+        // NOT just IsCompletedSuccessfully. A walk stopped by the abort flag
+        // returns normally, so the task "succeeds" - and ScanOutcome documents
+        // Completed as "reached the end under its own power". A sink trusting
+        // that alone (the SQLite one will) would record a cut-short scan as a
+        // full census and later conclude everything it missed was deleted.
+        Completed: scanTask.IsCompletedSuccessfully && Volatile.Read(ref scanAborted) == 0,
         Stalled: stallDetected,
         Faulted: scanFaulted,
         CameraMode: cameraMode,
         UndeterminedFiles: sink.UndeterminedFiles,
-        SubtreeLosses: sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext)));
+        SubtreeLosses: sink.Errors.Count(e => e.Stage is ScanStage.Enumerate or ScanStage.EnumerateNext
+                                       && !recoveredContainerIds.Contains(e.ObjectId))));
 }
 
 void RunRetryPass()
 {
 // --- Post-scan retry pass ---
-// Must run here, BEFORE the session cleanup below - GetNameAndType/
-// DetectKindBySignature need `properties`/`resources` still alive.
-// (First attempt put this after cleanup by mistake: crashed immediately with
-// "COM object that has been separated from its underlying RCW cannot be
-// used" - a real, sharp reminder that release-order matters.)
+// Runs while the session is still open - GetObjectInfo and
+// DetectKindBySignature need `properties`/`resources` alive. An early version
+// ran it after the session had been closed and crashed immediately with "COM
+// object that has been separated from its underlying RCW cannot be used": a
+// sharp reminder that release order matters.
 // The main walk is fully done now, so it's safe to retry the objects that
 // failed earlier - unlike retrying INSIDE the walk (which corrupted results,
 // see the note in CheckSignatureWithHealthMonitoring), there's no in-flight
@@ -504,6 +557,20 @@ if (failedObjects.Count > 0)
 
     foreach (var (objectId, path, stage) in toRetry)
     {
+        // The retry pass has to report progress and honour the abort flag just
+        // like the main walk, and it did neither.
+        //
+        // It makes device calls per object - a GetValues, sometimes an
+        // EnumObjects probe - and a permanently unreadable object can cost
+        // around 1.5 seconds. With 1,500-3,000 failures to retry, a perfectly
+        // healthy retry pass could easily go 45 seconds without touching
+        // lastProgressTicks, at which point the watchdog would declare the
+        // device wedged and FailFast a scan that was working fine. The mirror
+        // image was just as bad: a REAL wedge here could not be stopped,
+        // because the flag was only checked once before the loop.
+        Interlocked.Exchange(ref lastProgressTicks, DateTime.UtcNow.Ticks);
+        if (Volatile.Read(ref scanAborted) == 1) break;
+
         // A Properties failure stored the PARENT's path (the object's own name
         // was never resolved); an Enumerate failure stored the object's OWN
         // path (it had already been resolved and entered). Reconstructing both
@@ -528,12 +595,21 @@ if (failedObjects.Count > 0)
             try
             {
                 content.EnumObjects(0, objectId, null, out IEnumPortableDeviceObjectIDs? probe);
-                if (probe is not null)
+                try
                 {
-                    uint probeFetched = 0;
-                    probe.Next(1, out string _, ref probeFetched);
-                    if (probeFetched > 0) hiddenSubtrees++;
-                    System.Runtime.InteropServices.Marshal.ReleaseComObject(probe);
+                    if (probe is not null)
+                    {
+                        uint probeFetched = 0;
+                        probe.Next(1, out string _, ref probeFetched);
+                        if (probeFetched > 0) hiddenSubtrees++;
+                    }
+                }
+                finally
+                {
+                    // In a finally because Next() can throw - and on a failing
+                    // device it very often does. Released inline, this leaked
+                    // an enumerator per probe exactly when probes fail most.
+                    if (probe is not null) System.Runtime.InteropServices.Marshal.ReleaseComObject(probe);
                 }
             }
             catch (System.Runtime.InteropServices.COMException)
@@ -570,6 +646,13 @@ if (failedObjects.Count > 0)
             }
             PrintTree(objectId, recoveredPath);
             recoveredFolders++;
+
+            // Only Enumerate/EnumerateNext failures inflate SubtreeLosses, so
+            // only those are worth un-counting here.
+            if (stage is ScanStage.Enumerate or ScanStage.EnumerateNext)
+            {
+                recoveredContainerIds.Add(objectId);
+            }
         }
         else
         {
@@ -581,6 +664,9 @@ if (failedObjects.Count > 0)
     // Counted only after the work actually happened. The old version
     // incremented before the Android check and before the re-walk, so blocked
     // folders and folders that failed again both still reported as "recovered".
+    // PRE-SQLITE: console-only, and it is trust-relevant - how much of a scan
+    // was recovered versus lost belongs on the scan row, not just on screen.
+    // Needs a retry-level signal on IScanSink; there is none.
     Console.WriteLine($"Retry result: {recoveredFiles} file(s) and {recoveredFolders} folder(s) recovered, " +
         $"{stillUnreadable} still unreadable.");
     if (hiddenSubtrees > 0)
@@ -596,9 +682,11 @@ if (failedObjects.Count > 0)
 }
 }
 
-// PRE-SQLITE: this whole summary (totals, signature stats, health) becomes a
-// query. For the console probe it moves into ConsoleScanSink.OnScanFinished,
-// which already holds the data; nothing here should stay in Program.cs.
+// PRE-SQLITE: this whole summary becomes a query, and for the console probe it
+// moves into ConsoleScanSink.OnScanFinished. Note what that move needs: the
+// sink holds the file totals, but the signature counters and the health state
+// below are locals here and reach no sink at all. They have to travel - as
+// arguments, or on ScanOutcome - before the block can move anywhere.
 Console.WriteLine($"\nDone. {sink.MediaFiles} media file(s) and {sink.Documents} document(s) found out of {sink.TotalFilesSeen} file(s) seen.");
 Console.WriteLine($"({caughtBySignatureOnly} of those were caught only by file signature - their extension wasn't recognized.)");
 Console.WriteLine($"Expensive signature check actually ran on {signatureChecksActuallyRun} file(s) (out of {sink.TotalFilesSeen} total).");
@@ -609,6 +697,9 @@ if (health.SkippedBecauseDisabled > 0)
         "UNCHECKED because the circuit breaker had already disabled signature checking. Any of them could be a " +
         "real photo or video that this scan did not count.");
 }
+// PRE-SQLITE: the breaker's verdict belongs on the scan row - a scan that
+// stopped checking signatures partway is not fully trustworthy - but it reaches
+// no sink today, so ScanOutcome cannot carry it yet.
 Console.WriteLine(health.CheckingDisabled
     ? "Session health: signature checking was DISABLED partway through this scan (see warning above)."
     : "Session health: OK, signature checking ran normally for the whole scan.");
@@ -740,6 +831,14 @@ void PrintTree(string objectId, string parentPath)
         string childId = "";
         do
         {
+            // Checked BEFORE Next(), not after. When a nested PrintTree returns
+            // because of the abort flag, this parent loop would otherwise issue
+            // one more Next() on the way out - and it does that at every level
+            // of the recursion. On a wedged device each of those is a fresh
+            // call that can block, which is precisely what the flag exists to
+            // prevent; Cancel() has already been spent by then.
+            if (Volatile.Read(ref scanAborted) == 1) break;
+
             try
             {
                 fetched = 0;
@@ -771,6 +870,15 @@ void PrintTree(string objectId, string parentPath)
             // failed was permanently marked "already handled" while never
             // having been counted - and the retry pass, which classifies
             // directly, had no way to notice.
+            // Already-seen objects are skipped BEFORE the property read, not
+            // after. When the retry pass re-walks a folder whose listing failed
+            // part-way, every child it already classified comes back round;
+            // reading their properties again is a wasted device round trip, and
+            // it also re-counted their missing properties and re-registered
+            // them as failures, inflating both filePropertyMisses and the
+            // "new failures during retry" figure.
+            if (classifiedObjectIds.Contains(childId) || walkedContainerIds.Contains(childId)) continue;
+
             var obj = GetObjectInfo(childId, parentPath);
             if (obj is null) continue; // recorded in failedObjects; the retry pass owns it now
 
@@ -815,13 +923,12 @@ void PrintTree(string objectId, string parentPath)
     }
 }
 
-// Android/data and Android/obb are blocked from external access by Android
-// itself since Android 11, and are where huge irrelevant per-app caches
-// live. Shared by PrintTree and RunRetryPass so a recovered object can't
-// bypass this the way it used to (the retry pass had no equivalent check).
+/// Reads a device-level string property, or null if the driver does not supply it.
+///
+/// (The Android/data,obb rules this comment used to describe moved to
+/// FolderPolicy; what follows belongs to IsCameraMode, further down.)
 //
-// Asks the device which USB mode it is actually in, and warns when that mode
-// is one that hides files.
+// PTP-mode rationale, for IsCameraMode below.
 //
 // Measured on a Galaxy J7 Prime2, same cable, same code, only the phone's USB
 // setting changed:
@@ -838,7 +945,6 @@ void PrintTree(string objectId, string parentPath)
 // videos were missing from it - and in a flattened "all your photos" view
 // there is no folder structure left to notice the absence against. A silently
 // incomplete answer is worse here than a loud failure.
-/// Reads a device-level string property, or null if the driver does not supply it.
 string? ReadDeviceString(_tagpropertykey key)
 {
     IPortableDeviceKeyCollection? keys = null;
@@ -934,6 +1040,8 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
     double? trippedAt = health.RecordResult(errored: signatureCheckErrors > errorsBefore);
     if (trippedAt is double rate)
     {
+        // PRE-SQLITE: the moment the breaker trips is a scan-level event worth
+        // recording, not just printing.
         Console.WriteLine($"\n[WARNING] Signature checks are failing at {rate:P0} - the device session's " +
             "stream-reading capability looks broken, not just 'these files aren't media'. Disabling the " +
             "signature fallback for the rest of THIS scan (extension-based detection is unaffected and " +
@@ -1050,7 +1158,7 @@ FileKind DetectKindBySignature(string objectId)
 // Returns ok=false on failure rather than a placeholder name. The old version
 // returned ("(unreadable)", false), and that `false` meant "not a container",
 // so the caller treated every failed object as a FILE: it got counted in
-// totalFilesSeen, and since "(unreadable)" has no extension it fell all the way
+// the file count, and since "(unreadable)" has no extension it fell all the way
 // through to the signature check - opening a content stream on an object whose
 // property read had just failed. Those guaranteed failures then fed the health
 // monitor, which concluded the session was broken and switched off signature
@@ -1059,7 +1167,7 @@ FileKind DetectKindBySignature(string objectId)
 // unclassified. The placeholder was also a real filename a device could return.
 // A property the device chose not to supply comes back as a COMException from
 // the individual getter, not from GetValues itself. Absence is data, not an
-// error, so it is never recorded in scanErrors.
+// error, so it is never reported through sink.OnError.
 // `expected` says whether a missing value is worth counting. A container has
 // no filename, size or modified date to give, so its misses are normal and are
 // not counted; only a FILE lacking a property the device otherwise supplies
@@ -1136,29 +1244,3 @@ DeviceObject? GetObjectInfo(string objectId, string parentPath)
         }
     }
 }
-
-// One object as the device describes it. Only ObjectId, Name and IsContainer
-// are guaranteed; the rest are nullable because "the device did not tell us"
-// is a real and common answer, and pretending otherwise (0 for an unknown
-// size, DateTime.MinValue for an unknown date) would let missing data pass
-// silently into the manifest as though it were measured.
-record DeviceObject(
-    string ObjectId,
-    string Name,
-    string DisplayName,
-    bool IsContainer,
-    ulong? Size,
-    string? PersistentId,
-    string? ModifiedRaw);
-
-// FileKind now lives in FileKind.cs - it is returned by FileClassifier, which
-// is pure, so the enum has to be compilable without this file's COM interop.
-
-// Which WPD call failed. The distinction is the whole point: Enumerate and
-// EnumerateNext lose a folder's contents (an unknown number of files, possibly
-// thousands), while Properties loses a single object. A flat "N objects
-// skipped" count cannot tell those apart, so it cannot tell you whether a scan
-// that finished "successfully" actually saw your photos.
-enum ScanStage { Enumerate, EnumerateNext, Properties }
-
-record ScanError(string ObjectId, string ParentPath, ScanStage Stage, int HResult, string Message);

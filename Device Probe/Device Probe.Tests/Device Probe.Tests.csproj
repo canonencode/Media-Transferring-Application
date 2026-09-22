@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -12,29 +12,19 @@
     <RootNamespace>Device_Probe.Tests</RootNamespace>
   </PropertyGroup>
 
-  <!-- Deliberately NOT a <ProjectReference> to "Device Probe.csproj".
-       Two reasons, both load-bearing:
+  <!-- References MediaTransfer.Core, NOT the scanner executable.
 
-       1. That project carries COMReference items for PortableDeviceApiLib /
-          PortableDeviceTypesLib, and the ResolveComReference MSBuild task does
-          not exist in the .NET Core MSBuild that `dotnet test` runs (MSB4803).
-          Referencing it would make the tests unrunnable from the CLI at all.
+       The executable carries COMReference items for PortableDeviceApiLib and
+       PortableDeviceTypesLib, and the .NET Core MSBuild behind `dotnet test`
+       has no ResolveComReference task (MSB4803) - referencing it would make
+       these tests unrunnable from the command line.
 
-       2. The three classes under test claim to be pure - no COM, no device, no
-          console. Compiling their sources on their own, into an assembly that
-          has never heard of WPD, is what turns that claim into something the
-          build checks on every run. If someone later reaches for a COM type
-          inside FileClassifier, this project stops compiling, which is exactly
-          the alarm we want.
-
-       The classes are `internal` and namespace-less, so compiling the sources
-       in here (rather than referencing them) also sidesteps needing
-       InternalsVisibleTo. -->
+       The library has no COM reference of its own, so the old arrangement of
+       compiling individual source files in here is no longer needed, and the
+       property it was protecting still holds: if COM ever creeps into the
+       classes under test, the library stops building and the tests go with it. -->
   <ItemGroup>
-    <Compile Include="..\Device Probe\FileClassifier.cs" Link="Production\FileClassifier.cs" />
-    <Compile Include="..\Device Probe\FolderPolicy.cs" Link="Production\FolderPolicy.cs" />
-    <Compile Include="..\Device Probe\SessionHealthMonitor.cs" Link="Production\SessionHealthMonitor.cs" />
-    <Compile Include="..\Device Probe\FileKind.cs" Link="Production\FileKind.cs" />
+    <ProjectReference Include="..\MediaTransfer.Core\MediaTransfer.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -45,6 +35,7 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="MediaTransfer.Core" />
   </ItemGroup>
 
 </Project>

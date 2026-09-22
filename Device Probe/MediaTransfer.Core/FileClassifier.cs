@@ -1,4 +1,6 @@
-﻿/// <summary>
+﻿namespace MediaTransfer.Core;
+
+/// <summary>
 /// Decides what a file is, from its name and - when the name is not enough -
 /// from the first bytes of its content.
 ///
@@ -8,7 +10,7 @@
 /// below the least-tested part of the project despite being the part that
 /// decides whether a user's photo gets seen at all.
 /// </summary>
-static class FileClassifier
+public static class FileClassifier
 {
     // How relevance is decided: by the file's own extension, NOT by the folder
     // it sits in. Folder names are unreliable - the same app stores media under

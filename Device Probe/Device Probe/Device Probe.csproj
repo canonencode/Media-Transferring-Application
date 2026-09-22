@@ -29,4 +29,11 @@
     </COMReference>
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\MediaTransfer.Core\MediaTransfer.Core.csproj" />
+    <!-- Global so the walk can keep using the type names unqualified; the
+         library is not an optional extra here, it is where the contract lives. -->
+    <Using Include="MediaTransfer.Core" />
+  </ItemGroup>
+
 </Project>

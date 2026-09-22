@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- This project deliberately has NO COMReference and no dependency on the
+       scanner executable. That is not incidental tidiness - it is the thing
+       that keeps the claim "this logic is pure" honest:
+
+       1. The .NET Core MSBuild that `dotnet build` and `dotnet test` use has no
+          ResolveComReference task (MSB4803), so anything carrying a COM
+          reference can only be built by the full Visual Studio MSBuild. Keeping
+          this library clear of COM is what lets the tests - and later the UI -
+          build and run from the command line at all.
+
+       2. If someone reaches for a WPD type inside FileClassifier or a sink, this
+          project stops compiling. The alarm is the build itself, on every run,
+          rather than a comment asking people to be careful.
+
+       The scanner executable references this; so do the tests; so will the UI. -->
+
+</Project>

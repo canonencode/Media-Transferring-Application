@@ -1,9 +1,11 @@
-﻿/// <summary>
+﻿namespace MediaTransfer.Core;
+
+/// <summary>
 /// Prints a scan as an indented tree, and keeps the running totals the summary
 /// reports. This is the probe's own view of a scan; the SQLite writer will be a
 /// sibling of it, not a replacement for the walk.
 /// </summary>
-sealed class ConsoleScanSink : IScanSink
+public sealed class ConsoleScanSink : IScanSink
 {
     public int MediaFiles { get; private set; }
     public int UndeterminedFiles { get; private set; }

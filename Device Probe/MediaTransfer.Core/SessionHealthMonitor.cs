@@ -1,3 +1,5 @@
+﻿namespace MediaTransfer.Core;
+
 /// <summary>
 /// Watches the failure rate of content-stream reads and gives up on them once
 /// it is clear the session itself is broken rather than the files being
@@ -14,7 +16,7 @@
 /// makes the thing that decides whether to stop looking at file contents
 /// testable without a phone, which it previously was not.
 /// </summary>
-sealed class SessionHealthMonitor
+public sealed class SessionHealthMonitor
 {
     // A rolling batch rather than a running total: a session usually breaks
     // partway through, so a total would be diluted by all the successes that

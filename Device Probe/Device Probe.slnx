@@ -1,4 +1,5 @@
-<Solution>
+﻿<Solution>
+  <Project Path="MediaTransfer.Core/MediaTransfer.Core.csproj" />
   <Project Path="Device Probe/Device Probe.csproj" />
   <Project Path="Device Probe.Tests/Device Probe.Tests.csproj" />
 </Solution>
