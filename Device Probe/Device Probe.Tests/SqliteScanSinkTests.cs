@@ -222,6 +222,12 @@ public class SqliteScanSinkTests
         Assert.Equal(2, db.Count("scan"));
         // The name is the phone's current one; the first sighting is the only
         // record of how long it has been known and must not be overwritten.
+        //
+        // CAN PASS SPURIOUSLY. Timestamp() has millisecond resolution and both
+        // scans here are empty, so on a fast machine they can land in the same
+        // millisecond and an overwritten first_seen_utc compares equal. Seen
+        // once during mutation testing. Nothing asserts last_seen_utc moved
+        // either. Finding F5.
         Assert.Equal("Renamed Phone", db.Text("SELECT friendly_name FROM device"));
         Assert.Equal(firstSeen, db.Text("SELECT first_seen_utc FROM device"));
     }
@@ -451,6 +457,13 @@ public class SqliteScanSinkTests
         // The batch boundary re-points every prepared statement at a fresh
         // transaction; getting that wrong throws on the row after the commit,
         // which a test with a handful of files would never reach.
+        //
+        // WEAKER THAN IT LOOKS. Mutation testing raised RowsPerTransaction to a
+        // million - no boundary crossed at all - and this still passed, so it
+        // does not prove the boundary code runs. What would: reading the
+        // database from a second connection mid-scan and asserting the first
+        // batch is already visible. Finding F2 in
+        // docs/INCELEME-SQLITE-2026-09-22.md.
         using var db = new TempDatabase();
         using (var sink = new SqliteScanSink(db.Path))
         {
@@ -472,6 +485,14 @@ public class SqliteScanSinkTests
         // Committing periodically is what makes a killed scan leave evidence
         // instead of nothing. Past the batch size, the earlier rows are on disk
         // even though the scan never finished.
+        //
+        // DOES NOT PROVE THAT. Dispose() commits, so every row lands whether or
+        // not any periodic commit happened - mutation testing switched batching
+        // off entirely and this still passed. It currently proves only that
+        // Dispose commits, which AScanThatNeverFinishes_StaysRunning already
+        // shows with one file. A real Process.Kill (the stress suite in
+        // docs/sqlite-bulgular does one) is what actually demonstrates it, and
+        // it does hold: 2,000 of 2,600 rows survived. Finding F2.
         using var db = new TempDatabase();
         using (var sink = new SqliteScanSink(db.Path))
         {

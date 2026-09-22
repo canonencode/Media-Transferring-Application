@@ -201,21 +201,25 @@ var folderType = new Guid(0x27E2E392, 0xA111, 0x48E0, 0xAB, 0x0C, 0xE1, 0x77, 0x
 // something we need to step into to reach the real folders underneath.
 var functionalObjectType = new Guid(0x99ED0160, 0x17FF, 0x4C44, 0x9D, 0x98, 0x1D, 0x7A, 0x6F, 0x94, 0x19, 0x21);
 
-// PRE-SQLITE: both counters become COUNT queries over a file.classified_by
-// column - but that column cannot be filled yet. OnFile reports WHAT a file is,
-// never HOW that was decided, so the sink has no way to tell an extension match
-// from a signature match. Adding the column means adding that argument first.
+// Both are stored on the scan row now, as signature_checks_run and
+// caught_by_signature_only.
+//
+// GAP: they would be better as COUNT queries over a per-file classified_by
+// column, which still cannot be filled. OnFile reports WHAT a file is, never
+// HOW that was decided, so no sink can tell an extension match from a signature
+// match. The column needs that argument added to the interface first.
 int caughtBySignatureOnly = 0;
 int signatureChecksActuallyRun = 0;
-// PRE-SQLITE: signatureCheckErrors does TWO jobs and only one of them goes.
+// Does two jobs. As a statistic it reaches the scan row as
+// signature_check_errors; as the circuit breaker's error signal it is read by
+// diffing this global before and after each call.
 //
-// As a summary statistic it becomes a scan_error row - which needs a Stream
-// member added to ScanStage (there is none today) and a sink.OnError call from
-// DetectKindBySignature's catch, which currently reports nothing at all.
-//
-// As the circuit breaker's error signal it STAYS, but the mechanism should
-// change: DetectKindBySignature returning a bool instead of the caller diffing
-// a global before and after the call.
+// GAP: a failed signature check still produces no scan_error row, so the
+// database records how many failed but never which file or why. That needs a
+// Stream member on ScanStage - there is none - and a sink.OnError call from
+// DetectKindBySignature's catch, which today reports nothing at all. The
+// breaker's own signal would also be cleaner as a bool return than a global
+// diff, which is the kind of coupling that makes a counter hard to move.
 int signatureCheckErrors = 0;
 
 // The walk no longer prints anything. It reports to a sink, which is what lets
@@ -296,12 +300,14 @@ var failedObjects = new List<(string ObjectId, string Path, ScanStage Stage)>();
 // the double-counting bug: the main walk claimed an object's ID before it knew
 // whether the object was even readable, while the retry pass classified that
 // same object through a path that never consulted the set.
-// NOT pre-SQLite, despite appearances. An upsert on UNIQUE(device_id, path)
-// would make a duplicate WRITE harmless, but the set also stops the walk from
-// re-reading an object it has already handled - and that guard sits in front of
-// GetObjectInfo and the signature check, both of which are device round trips.
-// A database cannot prevent work that happens before the row is ever produced.
-// walkedContainerIds is the same story plus cycle-breaking.
+// The database does not make this set redundant, despite appearances. The file
+// table deliberately has no uniqueness constraint and no upsert - collapsing
+// two objects that share a path would be silent data loss, see the schema
+// comment in SqliteScanSink - but even if it did dedupe writes, the set stops
+// the walk from re-READING an object it has already handled, and that guard
+// sits in front of GetObjectInfo and the signature check, both device round
+// trips. A database cannot prevent work that happens before the row is ever
+// produced. walkedContainerIds is the same story plus cycle-breaking.
 var classifiedObjectIds = new HashSet<string>();  // files already counted
 var walkedContainerIds = new HashSet<string>();   // folders already enumerated; also breaks cycles
 
@@ -312,8 +318,15 @@ int sessionClosed = 0;
 // Same guard for the verdict. The watchdog reports just before FailFast, and
 // the main thread reports in its finally; if the scan unwedges in the moments
 // between the watchdog's Wait timing out and the process dying, both fire.
-// Beyond the duplicate output, the two threads would be reading the sink's
-// plain List<ScanError> at the same time as the scan thread appends to it.
+//
+// It serialises OnScanFinished against OnScanFinished and NOTHING ELSE. An
+// earlier version of this comment claimed it also kept two threads off the
+// sinks' lists; it does not, and saying so hid a real race. When the watchdog
+// reports, the scan thread is by construction still alive - the watchdog only
+// gets there because Wait() timed out - so it may still be inside OnFile or
+// ReportError while the watchdog walks the tally's error list, the console
+// sink's lists and the SQLite connection. Known and unfixed: section C of
+// docs/INCELEME-SQLITE-2026-09-22.md.
 int outcomeReported = 0;
 
 // Folders the retry pass got back now live on the tally, which is also what
@@ -332,11 +345,13 @@ bool scanFaulted = false;
 // have no bool overloads; 1 means "stop walking, the device is gone".
 int scanAborted = 0;
 
-// PRE-SQLITE: the counter goes, but NOT into scan_error. A missing optional
-// property is absence, not failure - the same reason TryReadString does not
-// report one - and a row in the error table would pollute the "lost one object"
-// group with objects that were read perfectly well. It is already derivable
-// from the file row: a NULL size or date on a non-container IS the miss.
+// Stored on the scan row as file_property_misses, and deliberately NOT as a
+// scan_error row: a missing optional property is absence, not failure - the
+// same reason TryReadString does not report one - and an error row would
+// pollute the "lost one object" group with objects that were read perfectly
+// well. It is also derivable from the file rows, where a NULL size or date on a
+// non-container IS the miss; the counter earns its place by making that
+// readable without a query.
 // Counts a FILE lacking a property the device otherwise supplies for every file.
 // Containers are excluded on purpose: the storage root has no filename, size or
 // modified date, and counting it produced a constant "3 errors" on every scan
@@ -723,6 +738,18 @@ if (failedObjects.Count > 0)
             PrintTree(objectId, recoveredPath);
             recoveredFolders++;
 
+            // BUG, known and not yet fixed - finding A3 in
+            // docs/INCELEME-SQLITE-2026-09-22.md. PrintTree can fail without
+            // telling its caller: it returns after recording a fresh error
+            // against this same objectId, or immediately when the abort flag is
+            // set. Control still arrives here, so a folder that could not be
+            // listed twice is counted as recovered AND erased from
+            // SubtreeLosses - which erases the new failure along with the old
+            // one, and can let a scan that provably lost a subtree call itself
+            // COMPLETE. ScanTally's contract says to call this only after a
+            // SUCCESSFUL re-walk; this call site does not honour it. The fix is
+            // for PrintTree to report whether it got through.
+            //
             // Only Enumerate/EnumerateNext failures inflate SubtreeLosses, so
             // only those are worth un-counting here.
             if (stage is ScanStage.Enumerate or ScanStage.EnumerateNext)
@@ -737,9 +764,12 @@ if (failedObjects.Count > 0)
         }
     }
 
-    // Counted only after the work actually happened. The old version
-    // incremented before the Android check and before the re-walk, so blocked
-    // folders and folders that failed again both still reported as "recovered".
+    // recoveredFolders is counted after the Android check, which an older
+    // version got wrong - but NOT after a check that the re-walk succeeded,
+    // because there is none. A folder that failed again still reports as
+    // recovered here and in the scan row's recovered_folders. Same root cause
+    // as the note above MarkContainerRecovered; one fix closes both.
+    //
     // How much of a scan was recovered versus lost is trust-relevant, so it
     // goes to the sinks rather than only to the screen: it belongs on the scan
     // row next to the verdict it qualifies.
@@ -1044,8 +1074,10 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
     double? trippedAt = health.RecordResult(errored: signatureCheckErrors > errorsBefore);
     if (trippedAt is double rate)
     {
-        // PRE-SQLITE: the moment the breaker trips is a scan-level event worth
-        // recording, not just printing.
+        // GAP: the scan row records THAT the breaker tripped
+        // (signature_checking_disabled) but not when, and not at what rate.
+        // Both say how much of the scan happened with the fallback switched
+        // off, which is exactly how trustworthy the result is.
         Console.WriteLine($"\n[WARNING] Signature checks are failing at {rate:P0} - the device session's " +
             "stream-reading capability looks broken, not just 'these files aren't media'. Disabling the " +
             "signature fallback for the rest of THIS scan (extension-based detection is unaffected and " +

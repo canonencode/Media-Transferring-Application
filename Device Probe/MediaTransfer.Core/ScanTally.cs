@@ -71,6 +71,14 @@ public sealed class ScanTally
     /// The retry pass listed this container after all, so whatever failure was
     /// recorded against it no longer hides anything. Safe to call for an id
     /// that never failed, and safe to call twice.
+    ///
+    /// PRECONDITION the caller must honour: only after the re-walk actually
+    /// SUCCEEDED. This clears every recorded failure for that id, including one
+    /// recorded moments ago by a re-walk that failed again - so calling it
+    /// optimistically can drive SubtreeLosses to zero for a folder that was
+    /// never listed, and let the scan call itself complete. The retry pass in
+    /// Program.cs currently violates this; see finding A3 in
+    /// docs/INCELEME-SQLITE-2026-09-22.md.
     /// </summary>
     public void MarkContainerRecovered(string objectId) => recoveredContainers.Add(objectId);
 

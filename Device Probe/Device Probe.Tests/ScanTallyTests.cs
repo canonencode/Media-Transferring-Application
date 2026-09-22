@@ -179,6 +179,16 @@ public class ScanTallyTests
     [Fact]
     public void BuildOutcome_CarriesEveryFigureTheSinksNeed()
     {
+        // BLIND TO A TRANSPOSITION, and that is a fixture problem, not a design
+        // one. Counting one file of each kind makes all three census fields 1,
+        // so mutation testing rotated MediaFiles -> Documents ->
+        // UndeterminedFiles and nothing failed. SignatureStats below is wired
+        // with distinct values precisely to catch that; the census counts
+        // should use distinct ones too (3/2/7, as the counter test does).
+        // Finding F4 in docs/INCELEME-SQLITE-2026-09-22.md. It matters because
+        // UndeterminedFiles feeds IsTrustworthy: media files landing in that
+        // slot would mark healthy scans partial, and the reverse would write a
+        // scan full of unexamined files to the database as 'complete'.
         var tally = new ScanTally();
         tally.CountFile(FileKind.MediaFile);
         tally.CountFile(FileKind.Document);

@@ -1,17 +1,20 @@
 /// <summary>
-/// Tests for <c>ConsoleScanSink</c> - the probe's own rendering of a scan, and
-/// the running totals its end-of-scan summary reports.
+/// Tests for <c>ConsoleScanSink</c> - the probe's own rendering of a scan.
+///
+/// Rendering is now the whole of its job. It used to keep the running totals
+/// too, and the walk read them back to build its ScanOutcome; those counters
+/// live in ScanTally now, so the tests for them are in ScanTallyTests.
 ///
 /// The sink is pure apart from writing to Console, so every test here redirects
 /// Console.Out to a StringWriter for its duration and restores it afterwards.
 /// That is safe under xunit's class-level parallelism only because no other
 /// test class writes to the console; keep it that way.
 ///
-/// Why the counters deserve pinning: the summary is the only place a user
-/// learns whether a scan can be trusted, and it is built from these numbers. A
-/// counter that drifts - Unknown files left out of the total, Undetermined
-/// folded into "not media" - is exactly the "scan looks complete while quietly
-/// skipping files" failure this project keeps running into.
+/// Why the rendering deserves pinning: this summary is the only place a user
+/// learns whether a scan can be trusted. A verdict that prints COMPLETE while
+/// the outcome says otherwise, or a reason line that goes missing, is the
+/// "scan looks complete while quietly skipping files" failure this project
+/// keeps running into - just at the last step instead of the first.
 /// </summary>
 public class ConsoleScanSinkTests
 {

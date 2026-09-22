@@ -14,6 +14,15 @@ namespace MediaTransfer.Core;
 /// a pulled cable or a power cut leaves a row that says so. Nothing else in
 /// this project may assume a scan finished; the whole reason the project exists
 /// is that an interrupted transfer which LOOKS finished is how files get lost.
+///
+/// That promise has two holes today, both known and unfixed - findings A1 and
+/// A2 in docs/INCELEME-SQLITE-2026-09-22.md. OnScanFinished does not close the
+/// sink, so files reported afterwards are still written INTO a row that already
+/// says 'complete': a real Process.Kill run recorded 2,600 files reported,
+/// 2,000 rows on disk and total_files_seen saying 100, all under status
+/// 'complete'. And a second OnScanFinished rewrites the status, so it can
+/// promote a 'partial' scan to 'complete'. The scanner guards the second case
+/// with Interlocked; this class should not be relying on its caller for that.
 /// </summary>
 public sealed class SqliteScanSink : IScanSink, IDisposable
 {
@@ -59,6 +68,14 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
             Mode = SqliteOpenMode.ReadWriteCreate,
         }.ToString());
         connection.Open();
+
+        // The four statements below run on an already-open connection, and if
+        // any of them throws, the constructor escapes without closing it -
+        // finding B5, known and not yet fixed. Throwing is the intended
+        // behaviour (Program.cs catches it and scans without recording), but
+        // the point of throwing is to let the caller fall back, and a leaked
+        // connection keeps the file locked until GC, so retrying the same path
+        // fails too.
 
         // WAL so a reader (a UI, later) can look at previous scans while this
         // one is still writing. NORMAL rather than FULL because a scan is
@@ -155,6 +172,19 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
             hresult     INTEGER NOT NULL,
             message     TEXT NOT NULL
         );
+
+        -- MISSING: scan_root. Nothing records WHICH storage roots a scan
+        -- covered, so a phone scanned with its SD card removed completes
+        -- cleanly and every file on that card later reads as deleted. The J7
+        -- exposes three storage objects, so this is a real configuration, not
+        -- a hypothetical. Finding A6; it also fixes the localized-storage-name
+        -- problem, where changing the phone's language renames every path.
+        --
+        -- MISSING: PRAGMA user_version. CREATE TABLE IF NOT EXISTS silently
+        -- does nothing to an existing database, so adding a column here would
+        -- leave older files on the old schema and then fail at INSERT time on
+        -- a user's machine. No test can catch it - every test opens a fresh
+        -- file. Finding E1, and the one item whose cost grows while it waits.
 
         CREATE INDEX IF NOT EXISTS ix_file_scan_path ON file(scan_id, path);
         CREATE INDEX IF NOT EXISTS ix_file_scan_kind ON file(scan_id, kind);
@@ -260,6 +290,13 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         command.Parameters["$name"].Value = obj.Name;
         command.Parameters["$object"].Value = obj.ObjectId;
         command.Parameters["$persistent"].Value = Nullable(obj.PersistentId);
+        // BUG, known and not yet fixed - finding B4. Size is a ulong and this
+        // cast is unchecked, so a value above long.MaxValue wraps to a negative
+        // number. The realistic trigger is not a 9-exabyte file but an MTP
+        // stack reporting 0xFFFFFFFFFFFFFFFF as "size unknown", which lands
+        // here as -1 and reads back as a measured fact. ScanTypes says exactly
+        // why that is forbidden: a fabricated value passes for a measured one.
+        // DBNull is the honest answer.
         command.Parameters["$size"].Value = obj.Size is { } size ? (long)size : DBNull.Value;
         command.Parameters["$modified"].Value = Nullable(obj.ModifiedRaw);
         command.Parameters["$kind"].Value = kind.ToString();
@@ -365,6 +402,14 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         update.Parameters.AddWithValue("$hiddenSubtrees", (object?)retry?.HiddenSubtrees ?? DBNull.Value);
         update.Parameters.AddWithValue("$retryNewFailures", (object?)retry?.NewFailures ?? DBNull.Value);
         update.Parameters.AddWithValue("$scan", ScanId);
+
+        // BUG, known and not yet fixed - finding B1. The return value is
+        // dropped. If ScanId is 0 - OnScanFinished without OnScanStarted, or
+        // ExecuteScalar having come back null - this matches no rows, returns
+        // 0 and throws nothing, so a caller sees a scan run start to finish
+        // while the database holds nothing at all. OnFile guards that case
+        // loudly; the call that can least afford to fail quietly is the one
+        // that does. Treating a row count other than 1 as an error fixes it.
         update.ExecuteNonQuery();
     }
 
@@ -405,9 +450,18 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     static object Nullable(string? value) =>
         string.IsNullOrEmpty(value) ? DBNull.Value : value;
 
-    // Sortable, unambiguous and timezone-free. A local-time string would sort
-    // wrongly across a DST change, which matters the moment two scans are
+    // Meant to be sortable and unambiguous, because started_utc/finished_utc are
+    // TEXT and sort lexically, and that matters the moment two scans are
     // compared to work out what was added or removed.
+    //
+    // BUG, known and not yet fixed - finding A5 in
+    // docs/INCELEME-SQLITE-2026-09-22.md. There is no CultureInfo here, so the
+    // format follows the machine's region setting: ar-SA writes a Hijri year
+    // (1448), th-TH a Buddhist one (2569). Those sort BEFORE every Gregorian
+    // row, so "the newest scan" resolves to the oldest and a stale census gets
+    // compared against the live phone. A Windows region setting is enough to
+    // trigger it. The fix is CultureInfo.InvariantCulture, plus a Z suffix so
+    // the value says out loud that it is UTC.
     static string Timestamp() => DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff");
 
     static InvalidOperationException NotStarted() =>
@@ -418,11 +472,23 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     /// never reached OnScanFinished keeps its 'running' status on purpose: the
     /// rows are real and worth keeping, but nothing may treat them as a
     /// complete picture of the device.
+    ///
+    /// Two known defects here - findings B2 and B3 in
+    /// docs/INCELEME-SQLITE-2026-09-22.md. The catch below discards up to
+    /// RowsPerTransaction rows without a word, and there is no finally, so a
+    /// Commit that throws anything other than SqliteException skips every
+    /// Dispose beneath it and leaves the file handle and the SQLite lock held -
+    /// which is the "next run finds a locked database" failure CompositeScanSink
+    /// says it exists to prevent.
     /// </summary>
     public void Dispose()
     {
+        // Not saving is defensible here: there is nowhere left to save it into,
+        // and the scan row still says 'running', so nothing downstream can
+        // mistake the gap for a census. Staying SILENT about it is not - every
+        // other failure in this layer is announced. See finding B2.
         try { Commit(); }
-        catch (SqliteException) { /* nothing left to save it into */ }
+        catch (SqliteException) { }
 
         insertFile?.Dispose();
         insertFolder?.Dispose();

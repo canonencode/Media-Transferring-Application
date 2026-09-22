@@ -120,10 +120,26 @@ public record ScanOutcome(
     int FilePropertyMisses)
 {
     /// <summary>
-    /// True only when nothing at all casts doubt on the census. Deliberately
-    /// strict: a scan is either provably complete or it is partial, because
-    /// "mostly complete" is what lets a store conclude that files it never
-    /// looked at have been deleted from the phone.
+    /// Whether this scan may be read as a full census. Deliberately strict
+    /// about what it does check: a scan is either provably complete or it is
+    /// partial, because "mostly complete" is what lets a store conclude that
+    /// files it never looked at have been deleted from the phone.
+    ///
+    /// INCOMPLETE, known and not yet fixed - finding A4 in
+    /// docs/INCELEME-SQLITE-2026-09-22.md. Two kinds of loss get past it:
+    ///
+    /// - Properties-stage errors. ScanTally.SubtreeLosses counts only
+    ///   Enumerate/EnumerateNext, but a Properties failure loses one object
+    ///   AND its subtree when that object was a folder - which is what
+    ///   ConsoleScanSink prints about it. ScanOutcome carries no error count
+    ///   at all, so nothing here can see them.
+    /// - RetryOutcome.HiddenSubtrees, documented as folders whose entire
+    ///   contents were silently lost. It is stored on the scan row and never
+    ///   reaches this predicate.
+    ///
+    /// So a scan can satisfy this and still have lost photographs. The console
+    /// at least prints the error breakdown underneath; the database qualifies
+    /// its status with nothing.
     /// </summary>
     public bool IsTrustworthy =>
         Completed && !Stalled && !Faulted && !CameraMode &&
