@@ -2,7 +2,17 @@
 
 **Tarih:** 2026-09-22
 **İncelenen commit:** `423177f`
-**Durum:** hiçbiri düzeltilmedi. Bu belge düzeltme oturumunun giriş listesidir.
+**Durum:** kardinal ve sessiz hataların hiçbiri düzeltilmedi. Bu belge düzeltme
+oturumunun giriş listesidir.
+
+**2026-09-23'te yapılanlar** (liste dışı, ayrıca istendi):
+- Yorumlar koda göre yeniden yazıldı; yalan söyleyenler düzeltildi, bilinen hatalar
+  yaşadıkları yerde bulgu numarasıyla işaretlendi (`ae2379b`).
+- **Saklama/budama eklendi** — cihaz başına son 10 tarama. Şema ajanının "anlık görüntü
+  modeli kalsın, budama sonra" önerisinin budama kısmı. Üç şeye dokunulmuyor: `running`
+  satırı, en yeni `complete` tarama, ve saklama ≤ 0 ise hiçbir şey. `scan_error(scan_id)`
+  ve `skipped_folder(scan_id)` indeksleri bununla birlikte geldi. 11 test (`cf37e62`).
+- Ölçüm: tarama başına 4,3 MB; 10 tarama tavanı ≈ 43 MB.
 
 Beş bağımsız ajan incelendi: uç durum testi (kod yazıp çalıştırdı), doğruluk incelemesi,
 şema incelemesi, dikiş/bağlantı incelemesi, mutasyon testi.
@@ -208,7 +218,7 @@ ediyor — **yanlış ve yarışı gizliyor**, mutlaka düzeltilmeli.
 | E1 | `PRAGMA user_version` yok. `CREATE TABLE IF NOT EXISTS` yarın sütun eklendiğinde mevcut veritabanlarında **sessizce hiçbir şey yapmaz**, sonra kod olmayan sütuna INSERT eder ve kullanıcının makinesinde çalışma anında patlar. **Testler bunu asla yakalayamaz — her test sıfırdan dosya açıyor.** ~20 satır | **ilk sıra** — maliyeti bekledikçe artan tek madde |
 | E2 | `scan.status` üzerinde `CHECK (status IN (...))` yok. Güven modelinin tamamı bu değerlere dayanıyor ama bugün her string yasal. Aynısı `camera_mode`, `recovered`, `key_is_fallback` için `CHECK (x IN (0,1))` | yüksek |
 | E3 | Çökmüş taramanın `running` satırı sonsuza dek `running`. "Şu anda çalışıyor" ile "üç hafta önce öldü" aynı değer. Açılışta `UPDATE scan SET status='abandoned' WHERE status='running'` | yüksek |
-| E4 | İndeks eksik: `persistent_id` (kimlik sorgularının tamamı tam tarama), `scan_error(scan_id)`, `skipped_folder(scan_id)` | orta |
+| E4 | İndeks eksik: `persistent_id` (kimlik sorgularının tamamı tam tarama). **`scan_error(scan_id)` ve `skipped_folder(scan_id)` eklendi** (2026-09-23, budamayla birlikte) | orta |
 | E5 | `file_id`/`folder_id` üzerindeki `AUTOINCREMENT` kimsenin kullanmadığı bir garanti için tarama başına ~13.900 ek `sqlite_sequence` güncellemesi yapıyor. `scan_id`'de **kalmalı** (her yerden referans veriliyor) | orta |
 | E6 | Zaman damgalarında `Z` yok — değer kendini UTC olarak tanımlamıyor. A5 ile birlikte yapılsın | düşük |
 | E7 | `camera_mode` `OnScanStarted`'dan, `status` `outcome.CameraMode`'dan geliyor — aynı gerçek, iki kaynak, çapraz kontrol yok | düşük |
