@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>Medya Aktarım Uygulaması — Proje Raporu</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 20mm 16mm; }
+  * { box-sizing: border-box; }
+  html { font-size: 10.5pt; }
+  body {
+    font-family: "Segoe UI", "Inter", -apple-system, Roboto, Arial, sans-serif;
+    color: #1f2933; line-height: 1.5; margin: 0;
+  }
+  :root { --accent: #1f4e79; --accent-light: #e8eef5; --muted: #5f6b7a; --line: #d6dbe1; --ok: #2e7d32; --warn: #b26a00; --bad: #b3261e; }
+
+  /* ---------- cover ---------- */
+  .cover { height: 250mm; display: flex; flex-direction: column; justify-content: center; page-break-after: always; }
+  .cover .kicker { color: var(--accent); font-weight: 600; letter-spacing: .12em; text-transform: uppercase; font-size: 9pt; }
+  .cover h1 { font-size: 30pt; line-height: 1.15; margin: 10px 0 8px; color: #111; }
+  .cover .sub { font-size: 13pt; color: var(--muted); max-width: 150mm; }
+  .cover .meta { margin-top: 40px; border-top: 2px solid var(--accent); padding-top: 14px; color: var(--muted); font-size: 9.5pt; }
+  .cover .meta b { color: #1f2933; }
+  .cover .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 36px; }
+  .stat { background: var(--accent-light); border-radius: 8px; padding: 12px 14px; }
+  .stat .n { font-size: 20pt; font-weight: 700; color: var(--accent); line-height: 1; }
+  .stat .l { font-size: 8.5pt; color: var(--muted); margin-top: 4px; }
+
+  /* ---------- typography ---------- */
+  h2 { font-size: 16pt; color: var(--accent); margin: 26px 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--accent-light); page-break-after: avoid; }
+  h2 .num { color: var(--muted); font-weight: 500; margin-right: 8px; }
+  h3 { font-size: 11.5pt; margin: 18px 0 6px; color: #111; page-break-after: avoid; }
+  p { margin: 6px 0 9px; }
+  code, .mono { font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace; font-size: 9.2pt; background: #f3f5f8; padding: 1px 4px; border-radius: 3px; }
+  ul, ol { margin: 4px 0 10px 20px; padding: 0; } li { margin: 3px 0; }
+
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; font-size: 9.5pt; page-break-inside: avoid; }
+  th { text-align: left; background: var(--accent); color: #fff; padding: 7px 9px; font-weight: 600; }
+  td { padding: 6px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:nth-child(even) td { background: #f8fafc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .callout { border-left: 4px solid var(--accent); background: var(--accent-light); padding: 10px 14px; margin: 12px 0; border-radius: 0 6px 6px 0; page-break-inside: avoid; }
+  .callout.warn { border-color: var(--warn); background: #fff7e6; }
+  .callout.ok { border-color: var(--ok); background: #eef7ee; }
+  .callout b:first-child { display: block; margin-bottom: 3px; }
+
+  figure { margin: 14px 0 18px; page-break-inside: avoid; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 9pt; color: var(--muted); margin-top: 6px; text-align: center; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .pb { page-break-before: always; }
+  .good { color: var(--ok); font-weight: 600; } .badc { color: var(--bad); font-weight: 600; }
+  .small { font-size: 9pt; color: var(--muted); }
+
+  .toc-page { page-break-after: always; }
+  .toc { list-style: none; margin: 14px 0 0; padding: 0; }
+  .toc li { display: flex; align-items: baseline; padding: 7px 0; border-bottom: 1px dotted var(--line); font-size: 10.5pt; }
+  .toc li .n { width: 28px; color: var(--muted); }
+  .toc li .t { flex: 1; font-size: 10.5pt; color: #1f2933; }
+  .toc li .p { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .toc li.sub { padding-left: 28px; font-size: 9.5pt; color: var(--muted); border-bottom: none; padding-top: 3px; padding-bottom: 3px; }
+
+  .exec { border-left: 4px solid var(--accent); padding: 4px 0 4px 18px; margin-top: 10px; }
+  .exec h3 { margin-top: 12px; color: var(--accent); }
+  .exec h3:first-child { margin-top: 0; }
+  .compact { font-size: 9.4pt; line-height: 1.38; }
+  .compact h3 { font-size: 10.5pt; margin: 10px 0 3px; }
+  .compact ol li, .compact p { margin: 2px 0; }
+  .compact table { font-size: 8.8pt; margin: 4px 0 6px; }
+  .compact td, .compact th { padding: 4px 7px; }
+  .compact table { page-break-inside: auto; }
+  .compact tr { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<!-- ================= KAPAK ================= -->
+<section class="cover">
+  <div class="kicker">Yazılım Projesi · Teknik Rapor</div>
+  <h1>Medya Aktarım Uygulaması</h1>
+  <div class="sub">Android telefonlardaki fotoğraf ve videoları, veri kaybına karşı güvenli biçimde bilgisayara aktaran bir Windows masaüstü uygulamasının cihaz tarama katmanı</div>
+
+  <div class="stats">
+    <div class="stat"><div class="n">4</div><div class="l">gerçek cihazda doğrulandı</div></div>
+    <div class="stat"><div class="n">198</div><div class="l">otomatik test, 55 ms</div></div>
+    <div class="stat"><div class="n">0</div><div class="l">hata, tam tarama</div></div>
+    <div class="stat"><div class="n">100×</div><div class="l">ölçülen soğuk / sıcak farkı</div></div>
+  </div>
+
+  <div class="meta">
+    <b>Hazırlayan:</b> Can Önen<br>
+    <b>Teknoloji:</b> C# / .NET 10 · Windows Portable Devices (WPD) COM API · MTP protokolü · xUnit<br>
+    <b>Kaynak kod:</b> github.com/canonencode/Media-Transferring-Application<br>
+    <b>Tarih:</b> Eylül 2026
+  </div>
+</section>
+
+<!-- ================= İÇİNDEKİLER ================= -->
+<section class="toc-page">
+  <h2 style="border:none; margin-top:0"><span class="num"></span>İçindekiler</h2>
+  <!--TOC-->
+</section>
+
+<!-- ================= 1. ÖZET ================= -->
+<h2><span class="num">1</span>Özet</h2>
+<p>Bu proje, telefonlardaki fotoğraf ve videoları bilgisayara aktaran ticari araçların (ör. CopyTrans Studio) iki temel zayıflığına cevap olarak başlatıldı: <b>aktarımın yarıda bozulup hangi dosyanın kopyalandığının bilinmemesi</b> ve <b>medyanın onlarca iç içe klasöre dağılmış olması</b>. Rapor, projenin ilk aşaması olan <b>cihaz tarama katmanını</b> kapsar: telefona bağlanan, tüm dosya ağacını yürüyen, her dosyayı sınıflandıran ve bunu güvenilmez donanım karşısında doğru biçimde raporlayan bileşen.</p>
+<p>Çalışma boyunca en belirleyici bulgu şu oldu: <b>kod incelemesi tek başına yetersizdir.</b> Beş bağımsız inceleme turunun "sağlıklı" dediği kodda, gerçek cihaz ölçümleri ve otomatik testler 20'den fazla kusur ortaya çıkardı; bunlardan ikisi kullanıcının fotoğraflarını sessizce kaybettiriyordu. Rapor bu kusurları, çözümlerini ve ölçümle doğrulanan sonuçları sunar.</p>
+
+<!-- ================= 2. PROBLEM ================= -->
+<h2><span class="num">2</span>Problem Tanımı</h2>
+<div class="two">
+  <div class="callout warn"><b>Sorun 1 — Kayıp takip</b>Mevcut araçlar aktarım yarıda kesildiğinde hangi dosyaların tamamlandığını kaydetmez. Kullanıcı ya baştan başlar ya da eksik yedekle kalır.</div>
+  <div class="callout warn"><b>Sorun 2 — Dağınık yapı</b>Android medyayı <code>DCIM/Camera</code>, <code>WhatsApp/Media/…</code>, uygulama klasörleri gibi onlarca yere dağıtır. Elle toplamak pratik değildir.</div>
+</div>
+<p>Her iki sorunun ortak kökü aynıdır: <b>uygulamanın cihazda ne olduğunu güvenilir biçimde bilmemesi.</b> Bu yüzden ilk aşama, doğru ve dürüst bir tarama katmanı inşa etmeye ayrıldı. "Dürüst" burada teknik bir gereksinimdir: tarama eksik kaldıysa bunu <i>söylemelidir</i>; eksik bir sonucun tam görünmesi, projenin çözmeye çalıştığı hatanın ta kendisidir.</p>
+
+<!-- ================= 3. MİMARİ ================= -->
+<h2 class="pb"><span class="num">3</span>Mimari</h2>
+<p>Sistem tek bir sorumluluk ilkesi etrafında ayrıştırıldı: <b>donanıma dokunan kod ile karar veren kod ayrı yaşar.</b> Sınıflandırma, klasör politikası ve sağlık izleme saf (pure) sınıflardır — COM, cihaz ya da konsol bilmezler. Bu ayrım olmadan projenin en kritik mantığı, fiziksel telefon bağlı olmadan tek bir satır test edilemiyordu.</p>
+
+<figure>
+<svg viewBox="0 0 780 600" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="dep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M1,1 L9,5 L1,9" fill="none" stroke="#5f6b7a" stroke-width="1.4"/>
+    </marker>
+    <marker id="impl" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
+      <path d="M1,1 L11,6 L1,11 z" fill="#fff" stroke="#1f4e79" stroke-width="1.4"/>
+    </marker>
+  </defs>
+  <style>
+    .box { fill:#fff; stroke:#1f4e79; stroke-width:1.4; }
+    .pure { fill:#eef7ee; stroke:#2e7d32; }
+    .data { fill:#fff7e6; stroke:#b26a00; }
+    .hdr { font-size:11px; font-weight:700; fill:#111; }
+    .st  { font-size:8.5px; fill:#5f6b7a; font-style:italic; }
+    .m   { font-size:8.3px; fill:#1f2933; font-family: Consolas, monospace; }
+    .sep { stroke:#1f4e79; stroke-width:1; }
+    .sep.pure { stroke:#2e7d32; } .sep.data { stroke:#b26a00; }
+    .dep { stroke:#5f6b7a; stroke-width:1.2; stroke-dasharray:5 3; fill:none; marker-end:url(#dep); }
+    .impl{ stroke:#1f4e79; stroke-width:1.4; stroke-dasharray:6 3; fill:none; marker-end:url(#impl); }
+    .lbl { font-size:8px; fill:#5f6b7a; }
+  </style>
+
+  <!-- Program -->
+  <rect class="box" x="290" y="14" width="200" height="66" rx="3"/>
+  <text class="st" x="390" y="28" text-anchor="middle">«orchestrator»</text>
+  <text class="hdr" x="390" y="42" text-anchor="middle">Program</text>
+  <line class="sep" x1="290" y1="48" x2="490" y2="48"/>
+  <text class="m" x="298" y="60">PrintTree(objectId, path)</text>
+  <text class="m" x="298" y="71">RunRetryPass() · CloseSession()</text>
+
+  <!-- IScanSink -->
+  <rect class="box" x="20" y="150" width="200" height="122" rx="3"/>
+  <text class="st" x="120" y="164" text-anchor="middle">«interface»</text>
+  <text class="hdr" x="120" y="178" text-anchor="middle" font-style="italic">IScanSink</text>
+  <line class="sep" x1="20" y1="184" x2="220" y2="184"/>
+  <text class="m" x="28" y="197">OnScanStarted(id, name, camera)</text>
+  <text class="m" x="28" y="209">OnFile(obj, path, kind, recov.)</text>
+  <text class="m" x="28" y="221">OnFolder(obj, path, recovered)</text>
+  <text class="m" x="28" y="233">OnFolderSkipped(path, reason)</text>
+  <text class="m" x="28" y="245">OnError(error)</text>
+  <text class="m" x="28" y="257">OnScanFinished(outcome)</text>
+
+  <!-- FileClassifier -->
+  <rect class="box pure" x="250" y="150" width="160" height="78" rx="3"/>
+  <text class="st" x="330" y="164" text-anchor="middle">«static · pure»</text>
+  <text class="hdr" x="330" y="178" text-anchor="middle">FileClassifier</text>
+  <line class="sep pure" x1="250" y1="184" x2="410" y2="184"/>
+  <text class="m" x="258" y="198">ClassifyByName(name): FileKind?</text>
+  <text class="m" x="258" y="210">ClassifyBySignature(bytes)</text>
+  <text class="m" x="258" y="222">SignatureBytes = 12</text>
+
+  <!-- FolderPolicy -->
+  <rect class="box pure" x="430" y="150" width="150" height="66" rx="3"/>
+  <text class="st" x="505" y="164" text-anchor="middle">«static · pure»</text>
+  <text class="hdr" x="505" y="178" text-anchor="middle">FolderPolicy</text>
+  <line class="sep pure" x1="430" y1="184" x2="580" y2="184"/>
+  <text class="m" x="438" y="198">ShouldSkip(parentPath,</text>
+  <text class="m" x="438" y="210">    name, out reason)</text>
+
+  <!-- SessionHealthMonitor -->
+  <rect class="box pure" x="600" y="150" width="165" height="102" rx="3"/>
+  <text class="st" x="682" y="164" text-anchor="middle">«pure»</text>
+  <text class="hdr" x="682" y="178" text-anchor="middle">SessionHealthMonitor</text>
+  <line class="sep pure" x1="600" y1="184" x2="765" y2="184"/>
+  <text class="m" x="608" y="198">CheckingDisabled: bool</text>
+  <text class="m" x="608" y="210">SkippedBecauseDisabled</text>
+  <line class="sep pure" x1="600" y1="216" x2="765" y2="216"/>
+  <text class="m" x="608" y="230">RecordResult(errored)</text>
+  <text class="m" x="608" y="242">RecordSkippedCheck()</text>
+
+  <!-- ConsoleScanSink -->
+  <rect class="box" x="20" y="330" width="200" height="92" rx="3"/>
+  <text class="hdr" x="120" y="348" text-anchor="middle">ConsoleScanSink</text>
+  <line class="sep" x1="20" y1="354" x2="220" y2="354"/>
+  <text class="m" x="28" y="368">MediaFiles · Documents</text>
+  <text class="m" x="28" y="380">TotalFilesSeen · Undetermined</text>
+  <text class="m" x="28" y="392">Errors · SkippedFolders</text>
+  <line class="sep" x1="20" y1="398" x2="220" y2="398"/>
+  <text class="m" x="28" y="412">Indent(path) — yoldan türetilir</text>
+
+  <!-- DeviceObject -->
+  <rect class="box data" x="250" y="330" width="160" height="104" rx="3"/>
+  <text class="st" x="330" y="344" text-anchor="middle">«record»</text>
+  <text class="hdr" x="330" y="358" text-anchor="middle">DeviceObject</text>
+  <line class="sep data" x1="250" y1="364" x2="410" y2="364"/>
+  <text class="m" x="258" y="378">ObjectId · Name · DisplayName</text>
+  <text class="m" x="258" y="390">IsContainer</text>
+  <text class="m" x="258" y="402">Size? · ModifiedRaw?</text>
+  <text class="m" x="258" y="414">PersistentId?</text>
+
+  <!-- ScanError -->
+  <rect class="box data" x="430" y="330" width="150" height="92" rx="3"/>
+  <text class="st" x="505" y="344" text-anchor="middle">«record»</text>
+  <text class="hdr" x="505" y="358" text-anchor="middle">ScanError</text>
+  <line class="sep data" x1="430" y1="364" x2="580" y2="364"/>
+  <text class="m" x="438" y="378">ObjectId · ParentPath</text>
+  <text class="m" x="438" y="390">Stage: ScanStage</text>
+  <text class="m" x="438" y="402">HResult · Message</text>
+
+  <!-- ScanOutcome -->
+  <rect class="box data" x="600" y="330" width="165" height="104" rx="3"/>
+  <text class="st" x="682" y="344" text-anchor="middle">«record»</text>
+  <text class="hdr" x="682" y="358" text-anchor="middle">ScanOutcome</text>
+  <line class="sep data" x1="600" y1="364" x2="765" y2="364"/>
+  <text class="m" x="608" y="378">Completed · Stalled</text>
+  <text class="m" x="608" y="390">Faulted · CameraMode</text>
+  <text class="m" x="608" y="402">UndeterminedFiles</text>
+  <text class="m" x="608" y="414">SubtreeLosses</text>
+
+  <!-- Enums -->
+  <rect class="box data" x="250" y="480" width="160" height="80" rx="3"/>
+  <text class="st" x="330" y="494" text-anchor="middle">«enumeration»</text>
+  <text class="hdr" x="330" y="508" text-anchor="middle">FileKind</text>
+  <line class="sep data" x1="250" y1="514" x2="410" y2="514"/>
+  <text class="m" x="258" y="528">Unknown · MediaFile</text>
+  <text class="m" x="258" y="540">Document · Undetermined</text>
+
+  <rect class="box data" x="430" y="480" width="150" height="66" rx="3"/>
+  <text class="st" x="505" y="494" text-anchor="middle">«enumeration»</text>
+  <text class="hdr" x="505" y="508" text-anchor="middle">ScanStage</text>
+  <line class="sep data" x1="430" y1="514" x2="580" y2="514"/>
+  <text class="m" x="438" y="528">Enumerate · EnumerateNext</text>
+  <text class="m" x="438" y="540">Properties</text>
+
+  <!-- dependencies from Program -->
+  <path class="dep" d="M330,80 L160,150"/>
+  <path class="dep" d="M370,80 L335,150"/>
+  <path class="dep" d="M410,80 L490,150"/>
+  <path class="dep" d="M470,80 L660,150"/>
+  <text class="lbl" x="228" y="112">«use»</text>
+
+  <!-- realization -->
+  <path class="impl" d="M120,330 L120,272"/>
+  <text class="lbl" x="128" y="304">implements</text>
+
+  <!-- interface uses records -->
+  <path class="dep" d="M220,230 L250,360"/>
+  <path class="dep" d="M220,250 C300,300 380,300 430,370"/>
+  <path class="dep" d="M220,262 C350,330 520,330 600,380"/>
+
+  <!-- classifier -> FileKind -->
+  <path class="dep" d="M330,228 L330,480"/>
+  <text class="lbl" x="336" y="300">returns</text>
+  <!-- ScanError -> ScanStage -->
+  <path class="dep" d="M505,422 L505,480"/>
+
+  <!-- legend -->
+  <rect x="600" y="470" width="165" height="90" rx="3" fill="#f8fafc" stroke="#d6dbe1"/>
+  <text x="608" y="486" font-size="8.5" font-weight="700" fill="#1f2933">Gösterim</text>
+  <rect x="608" y="494" width="14" height="10" class="box"/><text x="627" y="503" font-size="8">COM / düzenleme</text>
+  <rect x="608" y="510" width="14" height="10" class="box pure"/><text x="627" y="519" font-size="8">Saf mantık, test edilebilir</text>
+  <rect x="608" y="526" width="14" height="10" class="box data"/><text x="627" y="535" font-size="8">Değişmez veri</text>
+  <line x1="608" y1="548" x2="622" y2="548" class="dep"/><text x="627" y="551" font-size="8">bağımlılık / gerçekleştirme</text>
+</svg>
+<figcaption>Şekil 1 — UML sınıf diyagramı. Tarama (Program) yalnızca <i>IScanSink</i> soyutlamasına bağımlıdır; konsol çıktısı ve gelecekteki SQLite yazıcısı bu arayüzün birer gerçekleştirmesidir.</figcaption>
+</figure>
+
+<h3>Bileşenlerin sorumlulukları</h3>
+<table>
+<tr><th style="width:24%">Bileşen</th><th>Sorumluluk</th><th style="width:16%">Saf mı?</th></tr>
+<tr><td><code>Program</code></td><td>WPD oturumunu açar, ağacı özyinelemeli yürür, başarısızları bir kez yeniden dener, bekçiyi işletir, oturumu kapatır. COM'a dokunan tek yer.</td><td>Hayır (COM)</td></tr>
+<tr><td><code>IScanSink</code></td><td>Taramanın bulgularını raporladığı sözleşme. Tarama ekrana yazmaz; bu arayüze bildirir.</td><td>—</td></tr>
+<tr><td><code>ConsoleScanSink</code></td><td>Bulguları girintili ağaç olarak basar, toplamları tutar. Girintiyi yoldan türetir.</td><td>Evet</td></tr>
+<tr><td><code>FileClassifier</code></td><td>Uzantıya, yetmezse ilk 12 byte'a bakarak dosyanın türünü belirler.</td><td class="good">Evet</td></tr>
+<tr><td><code>FolderPolicy</code></td><td>Bir klasöre girilip girilmeyeceğine karar verir (OS engelli, önbellek, çöp, çıkartma).</td><td class="good">Evet</td></tr>
+<tr><td><code>SessionHealthMonitor</code></td><td>İçerik okumalarının hata oranını izler; oturum bozulduysa vazgeçer (devre kesici).</td><td class="good">Evet</td></tr>
+<tr><td><code>DeviceObject</code>, <code>ScanError</code>, <code>ScanOutcome</code></td><td>Değişmez veri taşıyıcıları. Eksik bilgi <code>null</code> ile temsil edilir, uydurma varsayılanla değil.</td><td class="good">Evet</td></tr>
+</table>
+
+<!-- ================= 4. AKIŞ ================= -->
+<h2 class="pb"><span class="num">4</span>Çalışma Akışı</h2>
+<p>Bir tarama beş adımdan geçer. Bekçi (watchdog) ayrı bir iş parçacığında koşar ve yalnızca <b>ilerlemeyi</b> izler — süreyi değil. Bu ayrım kritiktir: yavaş ama ilerleyen bir tarama ile donmuş bir tarama aynı görünür, ancak ilkine müdahale edilmemeli, ikincisi ise dakikalar içinde sonlandırılmalıdır.</p>
+
+<figure>
+<svg viewBox="0 0 780 470" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1,1 L9,5 L1,9 z" fill="#1f4e79"/>
+    </marker>
+  </defs>
+  <style>
+    .step { fill:#fff; stroke:#1f4e79; stroke-width:1.4; }
+    .t { font-size:10px; fill:#111; font-weight:600; }
+    .d { font-size:8.3px; fill:#5f6b7a; }
+    .fl { stroke:#1f4e79; stroke-width:1.5; fill:none; marker-end:url(#arr); }
+    .lane { fill:#fff7e6; stroke:#b26a00; stroke-dasharray:4 3; }
+    .end { fill:#eef7ee; stroke:#2e7d32; }
+    .endbad { fill:#fdecea; stroke:#b3261e; }
+  </style>
+
+  <!-- main lane -->
+  <rect class="step" x="40" y="20" width="420" height="52" rx="6"/>
+  <text class="t" x="52" y="40">1. Cihazı bul, oturumu aç</text>
+  <text class="d" x="52" y="55">WPD · GENERIC_READ · seri no, model, USB modu okunur → PTP ise uyar</text>
+
+  <rect class="step" x="40" y="96" width="420" height="52" rx="6"/>
+  <text class="t" x="52" y="116">2. Ağacı yürü — PrintTree</text>
+  <text class="d" x="52" y="131">Her nesne: GetValues → FolderPolicy / FileClassifier → sink.OnFile / OnFolder</text>
+
+  <rect class="step" x="40" y="172" width="420" height="52" rx="6"/>
+  <text class="t" x="52" y="192">3. Başarısızları bir kez yeniden dene — RunRetryPass</text>
+  <text class="d" x="52" y="207">Ana yürüyüş bittikten sonra, asla ortasında. Cihaz kilitlendiyse atlanır.</text>
+
+  <rect class="step" x="40" y="248" width="420" height="52" rx="6"/>
+  <text class="t" x="52" y="268">4. Sonucu bildir — sink.OnScanFinished(ScanOutcome)</text>
+  <text class="d" x="52" y="283">COMPLETE ya da PARTIAL; kısmiyse hangi sebeplerden</text>
+
+  <rect class="step" x="40" y="324" width="420" height="52" rx="6"/>
+  <text class="t" x="52" y="344">5. Oturumu kapat — CloseSession</text>
+  <text class="d" x="52" y="359">Idempotent; finally, ProcessExit ve Ctrl+C'den ulaşılır, tek kazanan</text>
+
+  <path class="fl" d="M250,72 L250,96"/>
+  <path class="fl" d="M250,148 L250,172"/>
+  <path class="fl" d="M250,224 L250,248"/>
+  <path class="fl" d="M250,300 L250,324"/>
+
+  <!-- watchdog lane -->
+  <rect class="lane" x="500" y="20" width="260" height="356" rx="8"/>
+  <text class="t" x="514" y="42" fill="#b26a00">Bekçi (ayrı iş parçacığı)</text>
+  <text class="d" x="514" y="60">Her 2 sn: son ilerlemeden bu yana geçen süre?</text>
+
+  <rect class="step" x="514" y="80" width="232" height="44" rx="6"/>
+  <text class="t" x="524" y="98">45 sn ilerleme yok?</text>
+  <text class="d" x="524" y="113">→ dur bayrağı + device.Cancel()</text>
+
+  <rect class="step" x="514" y="144" width="232" height="44" rx="6"/>
+  <text class="t" x="524" y="162">20 sn içinde geri sarıldı mı?</text>
+  <text class="d" x="524" y="177">Evet → adım 4'e düşer (PARTIAL)</text>
+
+  <rect class="endbad" x="514" y="208" width="232" height="52" rx="6" stroke-width="1.4"/>
+  <text class="t" x="524" y="228">Hayır → bulguları yaz, çık</text>
+  <text class="d" x="524" y="243">Thread sürücü çağrısında donmuş;</text>
+  <text class="d" x="524" y="254">hiçbir mekanizma kurtaramaz. FailFast.</text>
+
+  <path class="fl" d="M630,124 L630,144"/>
+  <path class="fl" d="M630,188 L630,208"/>
+
+  <text class="d" x="514" y="300">Ölçüm: donmuş bir tarama 22 dk boyunca</text>
+  <text class="d" x="514" y="312">0,00 sn CPU kullandı. Cancel() yok sayıldı.</text>
+  <text class="d" x="514" y="330">Sonuç: 30 dk beklemek yerine ~65 sn'de</text>
+  <text class="d" x="514" y="342">sonlanır ve elindeki sayımı bildirir.</text>
+
+  <!-- outcomes -->
+  <rect class="end" x="40" y="404" width="200" height="46" rx="6" stroke-width="1.4"/>
+  <text class="t" x="52" y="424" fill="#2e7d32">COMPLETE</text>
+  <text class="d" x="52" y="439">Her klasör listelendi, her dosya tanımlandı</text>
+  <rect class="endbad" x="260" y="404" width="200" height="46" rx="6" stroke-width="1.4"/>
+  <text class="t" x="272" y="424" fill="#b3261e">PARTIAL</text>
+  <text class="d" x="272" y="439">Kilitlendi / PTP / listelenemeyen klasör / …</text>
+  <path class="fl" d="M180,376 L140,404"/>
+  <path class="fl" d="M320,376 L360,404"/>
+</svg>
+<figcaption>Şekil 2 — Tarama akışı ve bekçi. Tarama her durumda bir verdiyle biter; sessizce eksik kalması tasarım gereği imkânsızdır.</figcaption>
+</figure>
+
+<!-- ================= 5. KALIPLAR ================= -->
+<h2><span class="num">5</span>Kullanılan Tasarım Kalıpları</h2>
+<p>Kalıplar önceden seçilip probleme uydurulmadı; her biri somut bir sorun çözülürken ortaya çıktı ve sonradan adlandırıldı. En az bunun kadar önemli olan, <b>bilinçli olarak kullanılmayan</b> kalıplardır.</p>
+<table>
+<tr><th style="width:22%">Kalıp</th><th style="width:22%">Nerede</th><th>Çözdüğü sorun</th></tr>
+<tr><td><b>Circuit Breaker</b></td><td><code>SessionHealthMonitor</code></td><td>Bozuk bir oturumda binlerce başarısız içerik okuması yerine, 20'lik bir pencerede %75 hata görüldüğünde vazgeçmek. Nygard'ın <i>Release It!</i> kitabındaki kalıbın el yapımı hali.</td></tr>
+<tr><td><b>Watchdog</b></td><td><code>Program</code> (bekçi iş parçacığı)</td><td>Donmuş ile yavaş taramayı ayırt etmek. Süreyi değil ilerlemeyi izler; 30 dakikalık genel zaman aşımının bu ayrımı yapamadığı ölçümle gösterildi.</td></tr>
+<tr><td><b>Dependency Inversion / Sink</b></td><td><code>IScanSink</code></td><td>Tarama bir soyutlamaya rapor verir. Konsol bugün, SQLite yarın — tarama kodu değişmez. Veritabanı ekrandan okuyamaz; bu dikiş sonraki aşamanın önkoşulu.</td></tr>
+<tr><td><b>Functional core, imperative shell</b></td><td><code>FileClassifier</code>, <code>FolderPolicy</code></td><td>Karar veren kodu, dünyaya dokunan koddan ayırmak. Bu ayrım yapılmadan projenin en kritik mantığı telefon olmadan test edilemiyordu.</td></tr>
+<tr><td><b>Deferred Retry</b></td><td><code>RunRetryPass</code></td><td>Satır içi yeniden deneme ölçüldü ve <i>kötüleştirdiği</i> görüldü (5 dk → 20+ dk): kalıcı olarak okunamayan nesnelere yapılan her deneme boşa bekleyiştir. Tek bir ertelenmiş geçiş, ana taramayı asla bloklamaz.</td></tr>
+<tr><td><b>Immutable records</b></td><td><code>DeviceObject</code> vb.</td><td>Veri taşıyan tipler değiştirilemez; "cihaz söylemedi" <code>null</code> ile temsil edilir, <code>0</code> ya da <code>DateTime.MinValue</code> gibi ölçülmüş gibi görünen uydurma değerlerle değil.</td></tr>
+<tr><td><b>Illegal states unrepresentable</b></td><td><code>FileKind</code></td><td>"Bakılmadı" ile "medya değil" tek bir değerle temsil edildiğinde 11.480 dosya sessizce kayboldu. Üç ayrı durum, üç ayrı anlam: <code>Unknown</code>, <code>Undetermined</code>, ve karar öncesi <code>null</code>.</td></tr>
+<tr><td><b>Idempotent cleanup</b></td><td><code>CloseSession</code></td><td>Üç ayrı yoldan (finally, ProcessExit, Ctrl+C) ulaşılabilen temizlik, <code>Interlocked</code> ile tek kazanana indirgendi.</td></tr>
+</table>
+<div class="callout"><b>Bilinçli olarak kullanılmayanlar</b>Bağımlılık enjeksiyonu konteyneri, repository kalıbı, tek gerçekleştirmesi olan bir <code>IDeviceConnection</code> arayüzü (tek örneğe göre arayüz tasarlamak tahmindir), baştan sona <code>async/await</code> (WPD senkron ve iş parçacığına bağlıdır; async makinesi yalan olurdu). Bir kalıbı <i>ne zaman uygulamamak</i> gerektiğini bilmek, uygulamayı bilmekten daha nadir bir beceridir.</div>
+
+<!-- ================= 6. ZORLUKLAR ================= -->
+<h2 class="pb"><span class="num">6</span>Karşılaşılan Teknik Zorluklar ve Çözümler</h2>
+
+<h3>6.1 Hata alan klasörün "dosya" sanılması</h3>
+<p>Bir nesnenin özellikleri okunamadığında kod <code>("(unreadable)", false)</code> döndürüyordu. O <code>false</code> "klasör değil" anlamına geliyor, dolayısıyla nesne dosya sanılıp içine hiç girilmiyordu. Sonuç: <b>DCIM dahil 9 kök klasör</b>, hiçbir hata mesajı olmadan görünmez oldu. Kamera fotoğraflarının tamamı taramada yoktu. Çözüm: üç durumlu dönüş (<code>ok</code> bayrağı), başarısız nesnenin sınıflandırılmaması.</p>
+
+<h3>6.2 Süre üzerine dört yanlış teori</h3>
+<p>Tarama bazen 18 saniye, bazen 15 dakika sürüyordu. Sırasıyla "cihaz yorgun", "property sayısı", "round trip sayısı" ve "önbellek klasörleri" suçlandı — <b>dördü de yanlıştı</b> ve hepsi aynı hatadan kaynaklanıyordu: iki koşunun duvar saatini karşılaştırıp farka sebep uydurmak. Cevap, sürecin içine kronometre konunca geldi:</p>
+<table>
+<tr><th>Durum</th><th class="num">GetValues / çağrı</th><th class="num">Toplam</th></tr>
+<tr><td>Soğuk (bağlantı sonrası ilk tarama)</td><td class="num">~20 ms</td><td class="num">4 – 5 dk</td></tr>
+<tr><td>Sıcak (arka arkaya tarama)</td><td class="num">~0,2 ms</td><td class="num">18 sn</td></tr>
+</table>
+<p>100 kat fark, ve belirleyici olan tek değişken bu. Property sayısı kontrollü A/B ile ölçüldü: 2 property 0,17 ms, 6 property 0,20 ms — <b>bedava</b>. Aynı 20 ms'lik soğuk maliyet, farklı üreticinin cihazında (Turkcell T70, ZTE yongası) bağımsız olarak doğrulandı: bu MTP'nin genel davranışıdır, üreticiye özgü değil.</p>
+<div class="callout ok"><b>Çıkarılan kural</b>Farklı koşuların duvar saatini karşılaştırma. Çağrı başına ölçüm yap, yalnızca aynı önbellek durumundaki koşuları kıyasla. Bu kural koda yorum olarak gömüldü.</div>
+
+<h3>6.3 PTP modu: sessiz %23 kayıp</h3>
+<p>Aynı telefon, aynı kablo, aynı kod; yalnızca telefonun USB ayarı değiştirildi: "Dosya aktarımı" 289 dosya, "Görüntü aktarımı" <b>222</b> dosya. Kaybolan 67 dosya: cihazdaki <b>bütün videolar</b>, 42 <code>.webp</code> ve 3 <code>.pdf</code>. PTP yalnızca durağan görüntü aktarır; telefon gerisini listeden çıkarır. Tehlikeli olan şu: bu tarama "0 hata, oturum sağlıklı" dedi. Çözüm: <code>WPD_DEVICE_TYPE</code> okunur; kamera (1) ise uyarılır ve sonuç PARTIAL işaretlenir. Her iki modda da gerçek cihazda doğrulandı.</p>
+
+<h3>6.4 Bekçi: kod incelemesinin bulamadığı bug</h3>
+<p>Bekçi ilk kez zorla tetiklendiğinde kilitlenmeyi doğru tespit etti, <code>Cancel()</code> çağırdı — ve tarama <b>4.838 nesne daha</b> devam edip yine dondu. <code>Cancel()</code> "uçuştaki işlemi" iptal eder; ama tarama tek bir uzun işlem değil, 14.500 küçük işlemdir. Biri iptal olur, döngü sonrakine geçer. Beş bağımsız inceleme bu kodu okudu ve onayladı; bug yalnızca <i>çalıştırınca</i> ortaya çıktı. Çözüm: yürüyüşün kendisinin kontrol ettiği bir dur bayrağı. Sonuç: 4.838 → 36 nesne.</p>
+
+<h3>6.5 Kurtarılamayan donma</h3>
+<p>Soğuk bir tarama 22 dakika boyunca <b>0,00 saniye CPU</b> ile bekledi: iş parçacığı bir sürücü çağrısının içinde donmuştu. Ne <code>Cancel()</code> ne dur bayrağı ulaşabildi — bayrak nesneler <i>arasında</i> kontrol edilir, çağrının içinden dönmeyen bir iş parçacığı oraya hiç gelmez. Normal <code>kill</code> bile süreci sonlandıramadı. Çözüm: bekçi 20 saniyelik bir bekleme sonrasında elindeki sayımı raporlar ve <code>FailFast</code> ile çıkar. 30 dakika beklemek bir güvenlik ağı değil, uzun adlı bir donmadır.</p>
+
+<h3>6.6 Yanlış sınıflandırmalar</h3>
+<p>Otomatik testler, canlı taramanın "sağlıklı" dediği kodda ölçülebilir hatalar buldu: <code>"BMW service log"</code> metni fotoğraf sayılıyordu (BMP kontrolü 2 byte'tı); <code>RIFF…WAVE</code> ses dosyaları medya sayılıyordu (8. byte'taki alt tip hiç okunmuyordu); <code>"the ftype is"</code> metni video sayılıyordu (kutu uzunluğu doğrulanmıyordu). Kullanıcının <code>Android</code> adlı bir albümü, OS klasörü sanılıp sessizce budanıyordu. Hepsi düzeltildi ve testle sabitlendi.</p>
+
+<!-- ================= 7. TEST ================= -->
+<h2 class="pb"><span class="num">7</span>Test Stratejisi</h2>
+<p>İki tamamlayıcı katman kullanıldı. Saf mantık birim testleriyle, donanıma dokunan kod gerçek cihazlarla doğrulanır. Test projesi kaynak dosyaları <i>bağlayarak</i> (link) derlenir, ana programa referans vermez: çıktısında tek bir COM interop dosyası bulunmaz, yani "bu sınıflar saftır" iddiasını derleyici doğrular.</p>
+<table>
+<tr><th style="width:26%">Test dosyası</th><th>Kapsadığı davranışlar</th></tr>
+<tr><td><code>FileClassifierNameTests</code></td><td>Her uzantı kategorisi; <code>null</code> (bilinmiyor, byte'lara bak) ile <code>Unknown</code> (kesinlikle ilgisiz) ayrımı; emoji, Türkçe karakter, uzantısız ad, sondaki nokta/boşluk, <code>.trashed-</code> adları; <b>tr-TR kültüründe</b> büyük/küçük harf güvenliği — Türkçe <code>İ</code> sorunu, her <code>.JPG</code>'yi cihaz okumasına gönderebilirdi.</td></tr>
+<tr><td><code>FileClassifierSignatureTests</code></td><td>Her sihirli byte imzası (JPEG, PNG, GIF, BMP, WEBP, ftyp, TIFF/DNG, WebM, JXL, JP2, PDF); kısa tampon; yanlış pozitifler — <code>"BMW service log"</code>, <code>RIFF…WAVE</code>, uzantısız M4A.</td></tr>
+<tr><td><code>FolderPolicyTests</code></td><td><code>Android/data</code> kuralının depolama köküne sabitlenmesi (<code>/Phone/DCIM/Android</code> atlanmamalı); ters bölü ayraçlı yollar; önbellek, çöp ve çıkartma klasörleri; <code>.Statuses</code> gibi gerçek medya içerebilen gizli klasörlerin atlanmaması.</td></tr>
+<tr><td><code>SessionHealthMonitorTests</code></td><td>14/20 tetiklemez, 15/20 tetikler; pencere sıfırlanır; bir kez tetiklenince kalır ve susar; atlanan kontroller sayılır.</td></tr>
+</table>
+<div class="two">
+  <div class="callout ok"><b>Testlerin bulduğu gerçek hatalar</b>BMP 2 byte, RIFF alt tipi, ftyp kutu uzunluğu, Android kuralı sabitlenmemiş. Hiçbiri canlı taramada görünmüyordu.</div>
+  <div class="callout ok"><b>Testlerin geri döndürdüğü hatalı düzeltmeler</b>İki kez: BMP'ye tek yönlü sınır konmuştu; sondaki nokta yanlış yerde kırpılmıştı. Kırmızı testler işini yaptı.</div>
+</div>
+<p><b>Birim testiyle kapsanmayan:</b> COM tarafı — retry geçişi, akış okuma döngüsü, oturum kapatma, bekçi. Fiziksel telefon gerektirdikleri için birim testi yazılamaz. Bunun yerine dört gerçek cihazda doğrulama ve <code>PROBE_FORCE_STALL</code> kancasıyla iptal yolunun zorla tetiklenmesi kullanıldı; bu kanca, kod incelemesinin bulamadığı bekçi hatasını ortaya çıkaran testtir.</p>
+
+<!-- ================= 8. SONUÇLAR ================= -->
+<h2><span class="num">8</span>Ölçüm Sonuçları</h2>
+<h3>8.1 Ana cihazda (Samsung Galaxy A56) başlangıç ve son durum</h3>
+<table>
+<tr><th>Ölçüt</th><th class="num">Başlangıç</th><th class="num">Son</th></tr>
+<tr><td>Tarama süresi (sıcak)</td><td class="num">4 dk 29 sn</td><td class="num good">18 – 21 sn</td></tr>
+<tr><td>Cihaz hatası</td><td class="num">3.136</td><td class="num good">0</td></tr>
+<tr><td>Görülen kök klasör</td><td class="num">8 / 17</td><td class="num good">16 / 16</td></tr>
+<tr><td>DCIM (kamera)</td><td class="num badc">görünmüyor</td><td class="num good">4.005 dosya</td></tr>
+<tr><td>Belgeler</td><td class="num">1</td><td class="num good">164</td></tr>
+<tr><td>Medya olarak sayılan</td><td class="num">17.416 (%46'sı küçük resim)</td><td class="num good">13.466 (tümü gerçek)</td></tr>
+<tr><td>Türkçe dosya adı</td><td class="num badc">sessizce bozuluyor (ğ→g)</td><td class="num good">doğru</td></tr>
+<tr><td>Tarama eksikse bildirir mi</td><td class="num badc">hayır</td><td class="num good">COMPLETE / PARTIAL</td></tr>
+</table>
+
+<h3>8.2 Cihazlar arası doğrulama</h3>
+<table>
+<tr><th>Cihaz</th><th>Özellik</th><th class="num">Dosya</th><th class="num">Süre</th><th>Sonuç</th></tr>
+<tr><td>Samsung Galaxy A56</td><td>Yeni Android, tek depolama</td><td class="num">13.790</td><td class="num">18 sn – 4 dk</td><td class="good">COMPLETE, 0 hata</td></tr>
+<tr><td>Samsung J7 Prime2</td><td>Eski Android, SD kart, 3 depolama nesnesi</td><td class="num">358</td><td class="num">9,6 sn</td><td class="good">COMPLETE, 0 hata</td></tr>
+<tr><td>Turkcell T70</td><td>ZTE yongası, farklı üretici</td><td class="num">91</td><td class="num">16 sn</td><td class="good">COMPLETE, 0 hata</td></tr>
+<tr><td>Samsung Tab S7 FE</td><td>Tablet</td><td class="num">62</td><td class="num">1,1 sn</td><td class="good">COMPLETE, 0 hata</td></tr>
+</table>
+<p class="small">Cihazlar arası öğrenilenler: depolama adı üç farklı biçimde geliyor ("Dahili depolama", "Phone", "Dahili depolama birimi") — asla anahtar olarak kullanılmamalı; seri numarası formatı 8 ile 32 hane arasında değişiyor — opak string olarak tutulmalı; aynı uygulama (WhatsApp) eski ve yeni Android'de tamamen farklı yerlerde duruyor — klasör adına değil uzantıya göre sınıflandırma kararı bununla doğrulandı.</p>
+
+<!-- ================= 9. DERSLER ================= -->
+<h2><span class="num">9</span>Öğrenilen Dersler</h2>
+<ol>
+  <li><b>Kod incelemesi gerekli ama yeterli değil.</b> Beş inceleme turu, bekçinin işe yaramadığını göremedi. Çalıştırmak gördü. Güvenlik-kritik bir yolu, ona inanmadan önce tetikle.</li>
+  <li><b>Ölçüm, kanıdan üstündür.</b> Süre konusunda dört yanlış teori, dördü de emin bir tonla dile getirildi; dördü de ölçümle çürüdü. Kontrolsüz karşılaştırma, hiç karşılaştırmamaktan kötüdür.</li>
+  <li><b>Sessiz eksiklik, gürültülü hatadan kötüdür.</b> "0 hata, sağlıklı" diyen bir tarama %23 dosya kaybettirebiliyordu. Sistem artık tam olmadığını söylemek zorunda.</li>
+  <li><b>Amaç netliği kapsamı değiştirir.</b> "Her medyayı al" ile "kaybedilse üzülünecek olanı al" iki farklı uygulamadır. İkincisi kullanıcının gerçekten istediğidir ve 13.989 dosyalık yığını anlamlı bir kümeye indirir.</li>
+  <li><b>Tek cihazda doğruluk, doğruluk değildir.</b> Dört cihaz, üç farklı depolama adı, iki seri numarası formatı, iki WhatsApp konumu.</li>
+</ol>
+
+<!-- ================= 10. SONRAKİ ================= -->
+<h2><span class="num">10</span>Sonraki Adımlar</h2>
+<p>Tarama katmanı, bir sonraki aşamanın önkoşullarını karşılıyor: sonuçlar bir arayüze raporlanıyor ve her tarama tam mı kısmi mi olduğunu bildiriyor. Sıradaki aşama <b>SQLite tabanlı kalıcı indeks</b>tir. Bu indeks iki başlangıç sorununu aynı anda çözer: hangi dosyanın kopyalandığını kaydeden bir manifest (sorun 1), ve klasör yapısını düzleştiren tek bir "tüm fotoğraflar" görünümü (sorun 2). Tasarım kararları alındı: cihaz kimliği seri numarasıyla anahtarlanır; dosya kimliği yol + boyut + tarih üçlüsüyle, kesinlik gerektiğinde içerik hash'iyle; kısmi bir tarama asla silinmiş dosya çıkarımına yol açmaz; tanınmayan bir cihazda hiçbir kayıt silinmez.</p>
+<p>Ardından sırasıyla: WinUI 3 arayüzü, parçalı ve devam ettirilebilir aktarım motoru, kurulum paketi. Uygulama tasarım gereği <b>salt okunurdur</b>; telefondan silme yeteneği, ancak doğrulanmış kopya, tek tek dosya, açık kullanıcı onayı ve denetim kaydı şartlarıyla ve ayrı bir aşamada eklenebilir.</p>
+
+<h3>Danışmanlık istenen açık sorular</h3>
+<ul>
+  <li><b>Kimlik anahtarı:</b> Dosya kimliği için yol + boyut + tarih üçlüsü seçildi; <code>PERSISTENT_UNIQUE_ID</code> yeniden bağlantıda korunsa da oturum kimliği de korunduğundan test ayırt edici değildi. Bu tercih güvenli mi, yoksa içerik hash'i tarama anında hesaplanmalı mı?</li>
+  <li><b>Kilitlenen iş parçacığı:</b> Sürücü çağrısında donan bir iş parçacığı süreç içinden kurtarılamıyor; tek çıkış <code>FailFast</code>. Bir masaüstü uygulamasında bunun kabul edilebilir bir tasarım olup olmadığı — ya da taramanın ayrı bir süreçte koşturulmasının doğru olup olmadığı.</li>
+  <li><b>Performans:</b> Soğuk tarama ~20 ms/çağrı ile 4-5 dakika. <code>IPortableDevicePropertiesBulk</code> bunu toplu okumaya çevirebilir ama her sürücü desteklemiyor. Bu yatırım SQLite indeksinden önce mi sonra mı yapılmalı?</li>
+  <li><b>Test kapsamı:</b> COM tarafı birim testiyle kapsanamıyor; sahte cihaz (fake) yazmak tek gerçekleştirmeye göre arayüz tasarlamak anlamına geliyor. Bu noktada beklemek mi, yoksa hata enjeksiyonlu sahte cihaza şimdi yatırım yapmak mı doğru?</li>
+</ul>
+
+<!-- ================= 11. SÜREÇ ================= -->
+<h2 class="pb"><span class="num">11</span>Geliştirme Süreci ve Çalışma Yöntemi</h2>
+<p>Proje, önceden yazılmış bir tasarımı uygulamak yerine <b>yinelemeli ve ölçüm odaklı</b> bir yöntemle yürütüldü: her adımda bir varsayım kuruldu, gerçek cihazda sınandı, sonuç ya varsayımı doğruladı ya da düzeltti. Aşağıda bu yöntemin somut unsurları özetlenmiştir.</p>
+
+<h3>11.1 Karar alma</h3>
+<p>Mimari ve ürün kararları geliştirici tarafından, seçeneklerin artı ve eksileri anlaşıldıktan sonra verildi. Başlıca kararlar: C#/.NET ve WPD COM API'sinin seçimi (Rust/Tauri ve Python alternatiflerine karşı); Android'in iPhone'dan önce ele alınması; SQLite'ın LiteDB yerine tercih edilmesi (sektörde yaygınlık ve öğrenme değeri gerekçesiyle); WinUI 3'ün WPF yerine seçilmesi; uygulamanın <b>salt okunur</b> olması ve silme yeteneğinin kesin kurallara bağlanması; "her medyayı al" yerine "kaybedilse üzülünecek olanı al" kapsamının benimsenmesi; çıkartmaların dışlanıp ekran görüntüleri ile WhatsApp resimlerinin tutulması.</p>
+
+<h3>11.2 Gerçek donanımla doğrulama</h3>
+<p>Hiçbir düzeltme yalnızca "mantıklı göründüğü" için kabul edilmedi. Her değişiklik bağlı bir telefonda çalıştırıldı ve sonuç sayılarla karşılaştırıldı. Dört farklı cihaz (iki üretici, telefon ve tablet, eski ve yeni Android, SD kartlı ve kartsız) kullanıldı. Kablo sökme-takma, farklı USB portuna geçme, USB modunu MTP ile PTP arasında değiştirme gibi fiziksel deneyler bizzat yürütüldü ve bunların her biri kodun tek başına ortaya çıkaramayacağı bir bulgu üretti: PTP modunun sessiz veri kaybı, cihaz kimliğinin port değişiminde korunması, soğuk önbelleğin 100 kat maliyeti.</p>
+
+<h3>11.3 Varsayımların sorgulanması</h3>
+<p>Süreçte birden çok kez, sunulan teşhisler kanıt istenerek reddedildi. "Cihaz yorgun" açıklaması ölçüm olmadığı gerekçesiyle kabul edilmedi ve daha sonra yanlış olduğu kanıtlandı. Eklenen tanılama kodunun kalıcı hale gelmesine karşı çıkıldı ve her geçici parça açık bir kaldırma işaretiyle etiketlendi. Bekçi mekanizmasının "çalıştığı" iddiası, gerçekten tetiklenmesi istenerek sınandı; bu test, beş inceleme turunun göremediği bir hatayı ortaya çıkardı.</p>
+
+<h3>11.4 Araçlar ve iş akışı</h3>
+<p>Geliştirme, bir yapay zekâ kod asistanıyla eşli programlama biçiminde yürütüldü: kodun yazımı ve tekrarlayan işler asistana bırakılırken, her kararın gerekçesi açıklanması istendi ve anlaşılmadan hiçbir parça kabul edilmedi. Asistanın hatalı sonuçlara vardığı durumlar (süre üzerine dört yanlış teori, DCIM teşhisi, bekçinin işlevselliği) geliştirici tarafından yakalanıp ölçümle düzeltildi. Kod incelemesi için birbirinden bağımsız açılardan bakan paralel inceleme turları düzenlendi; bulgular tek tek doğrulanıp önceliklendirildi. Sürüm kontrolü için Git kullanıldı; her commit, değişikliğin <i>neden</i> yapıldığını ve hangi ölçümle doğrulandığını açıklar. Tüm kod, yorumlar ve commit mesajları İngilizce yazıldı.</p>
+
+<h3>11.5 Öğrenme hedefi</h3>
+<p>Projenin amacı çalışan bir program üretmenin ötesinde, her parçanın <i>neden</i> öyle olduğunu anlamaktı. Bu nedenle kolay yol olan "çalışıyorsa dokunma" yaklaşımı yerine, her hata kök nedenine kadar izlendi ve her düzeltme ya bir birim testiyle ya da gerçek cihaz ölçümüyle sabitlendi. Raporun 9. bölümündeki dersler, bu sürecin doğrudan ürünüdür.</p>
+
+<!-- ================= 12. YÖNETİCİ ÖZETİ ================= -->
+<h2 class="pb"><span class="num">12</span>Yönetici Özeti</h2>
+<div class="exec">
+<h3>Ne yapıldı</h3>
+<p>Android telefonlardaki fotoğraf ve videoları bilgisayara güvenli biçimde aktaracak bir Windows uygulamasının <b>cihaz tarama katmanı</b> tasarlandı, gerçeklendi ve dört gerçek cihazda doğrulandı. Katman, telefona MTP protokolüyle bağlanır, tüm dosya ağacını yürür, her dosyayı uzantı ve içerik imzasıyla sınıflandırır, güvenilmez donanım karşısında hatasız çalışmaya devam eder ve <b>sonucunun tam mı eksik mi olduğunu açıkça bildirir</b>.</p>
+
+<h3>Neden önemli</h3>
+<p>Mevcut ticari araçların temel sorunu, aktarımın yarıda kesildiğinde hangi dosyanın kopyalandığını bilmemeleridir. Bu sorunun kökü, uygulamanın cihazda ne olduğunu güvenilir biçimde bilmemesidir. Çalışma boyunca ölçüldü ki bir tarama "0 hata, oturum sağlıklı" raporlarken bile cihazdaki tüm videoları kaçırabiliyor (PTP modu) ya da kamera klasörünün tamamını görmezden gelebiliyor (hata alan klasörün dosya sanılması). Bu nedenle katmanın birincil tasarım hedefi hız değil <b>dürüstlük</b> oldu: eksik bir tarama tam görünemez.</p>
+
+<h3>Mimari</h3>
+<p>Altı bileşen, tek ilkeyle ayrıştırıldı: <b>donanıma dokunan kod ile karar veren kod ayrı yaşar.</b> Sınıflandırma (<code>FileClassifier</code>), klasör politikası (<code>FolderPolicy</code>) ve sağlık izleme (<code>SessionHealthMonitor</code>) saf sınıflardır; COM, cihaz ya da konsol bilmezler. Tarama, sonuçlarını bir arayüze (<code>IScanSink</code>) raporlar; bugün konsol, bir sonraki aşamada SQLite bu arayüzün gerçekleştirmeleridir. Kullanılan kalıplar: devre kesici, bekçi, bağımlılığın tersine çevrilmesi, işlevsel çekirdek / buyurgan kabuk, ertelenmiş yeniden deneme, değişmez veri tipleri. Bilinçli olarak kullanılmayanlar: DI konteyneri, repository kalıbı, tek gerçekleştirmeli soyut arayüzler.</p>
+
+<h3>Test</h3>
+<p>198 birim testi, 55 milisaniyede, telefon olmadan çalışır ve saf mantığın tamamını kapsar. Bu testler, canlı taramanın sağlıklı dediği kodda yedi ölçülebilir hata buldu ve iki hatalı düzeltmeyi geri döndürdü. Donanıma dokunan kod dört gerçek cihazla ve zorla tetiklenen hata senaryolarıyla doğrulandı. Test projesi kaynak dosyaları bağlayarak derlenir; çıktısında hiçbir COM bağımlılığı bulunmaz, yani "bu sınıflar saftır" iddiasını derleyici kanıtlar.</p>
+
+<h3>Sonuçlar</h3>
+<table style="margin-top:6px">
+<tr><th>Ölçüt</th><th class="num">Başlangıç</th><th class="num">Son</th></tr>
+<tr><td>Tarama süresi (sıcak önbellek)</td><td class="num">4 dk 29 sn</td><td class="num good">18 sn</td></tr>
+<tr><td>Cihaz hatası</td><td class="num">3.136</td><td class="num good">0</td></tr>
+<tr><td>Görülen kök klasör</td><td class="num">8 / 17</td><td class="num good">16 / 16</td></tr>
+<tr><td>Kamera klasörü (DCIM)</td><td class="num badc">görünmüyor</td><td class="num good">4.005 dosya</td></tr>
+<tr><td>Eksik tarama tespiti</td><td class="num badc">yok</td><td class="num good">COMPLETE / PARTIAL verdiği</td></tr>
+<tr><td>Doğrulanan cihaz</td><td class="num">1</td><td class="num good">4</td></tr>
+</table>
+
+<h3>Başlıca bulgular</h3>
+<ul>
+  <li>Tarama süresi, istek sayısıyla değil <b>sürücü önbelleğinin durumuyla</b> belirlenir: bağlantı sonrası ilk tarama 100 kat yavaştır. Bu, kalıcı bir indeksin (SQLite) performans için de zorunlu olduğunu gösterir.</li>
+  <li>Kilitlenen bir sürücü çağrısı süreç içinden kurtarılamaz; <code>Cancel()</code> ve iptal bayrağı ulaşamaz. Bekçi 65 saniyede tespit edip elindeki sayımı raporlayarak çıkar.</li>
+  <li>Kod incelemesi, çalıştırmanın yerini tutmaz: beş inceleme turunun onayladığı bekçi mekanizması, ilk gerçek tetiklemede işe yaramadığını gösterdi.</li>
+</ul>
+
+<h3>Sıradaki adım</h3>
+<p>SQLite tabanlı kalıcı indeks. Önkoşulları karşılandı: tarama bir arayüze raporlar ve tamlığını bildirir. Şema kararları alındı: cihaz seri numarasıyla, dosya yol + boyut + tarih üçlüsüyle anahtarlanır; kısmi tarama asla silinmiş dosya çıkarımına yol açmaz. Danışmanlık istenen dört açık soru 10. bölümde listelenmiştir.</p>
+</div>
+
+<!-- ================= 13. ÜÇ SORU ================= -->
+<h2 class="pb"><span class="num">13</span>Üç Soruya Doğrudan Cevap</h2>
+<div class="compact">
+<p class="small">Bu sayfa, istenen üç soruyu tek sayfada, raporun ilgili bölümlerine atıfla cevaplar.</p>
+
+<h3>Soru 1 — Adım adım ne yapıldı?</h3>
+<ol style="margin-top:2px">
+  <li><b>Cihaza bağlanma:</b> WPD COM API'siyle telefon bulundu, salt okunur oturum açıldı, seri numarası ve USB modu okundu.</li>
+  <li><b>Ağaç yürüyüşü:</b> Tüm klasörler özyinelemeli gezildi; her dosya önce uzantıyla, tanınmazsa ilk 12 byte'ın imzasıyla sınıflandırıldı.</li>
+  <li><b>Güvenilmez donanım:</b> Hata alan nesne atlanıp devam edildi; başarısızlar ana tarama bitince bir kez yeniden denendi (satır içi deneme ölçülüp kötüleştirdiği görüldü, kaldırıldı).</li>
+  <li><b>Oturum sağlığı:</b> İçerik okuma hata oranı izlendi, oturum bozulduysa vazgeçilip raporlandı. Kapatılmayan oturum sonraki taramayı bozuyordu; kapatma ve COM temizliği eklendi.</li>
+  <li><b>Kod incelemesi:</b> İki tur, 20+ kusur. En ağırı: hata alan klasörün dosya sanılıp DCIM dahil 9 kök klasörün sessizce kaybolması; Türkçe adları bozan kodlama hatası.</li>
+  <li><b>Ölçüm:</b> Süre için dört yanlış teori; süreç içi kronometre gerçek sebebi buldu (sürücü önbelleği, 100×). Property okumanın bedava olduğu kontrollü A/B ile kanıtlandı.</li>
+  <li><b>Ürün gerçekleri:</b> Küçük resim ve önbellek klasörleri (medyanın %46'sı) ile çıkartmalar dışlandı; PTP modunun sessiz veri kaybı (289 → 222 dosya) tespit edilip uyarı eklendi.</li>
+  <li><b>Bekçi:</b> Donmayı ilerlemeye bakarak tespit eder; zorla tetiklenince <code>Cancel()</code>'ın döngüyü durdurmadığı görüldü, dur bayrağı eklendi; kurtarılamayan donmada sayım raporlanıp çıkılır.</li>
+  <li><b>Ayrıştırma ve test:</b> Tek dosya 6 parçaya bölündü; saf mantık 198 birim testiyle, donanım tarafı 4 gerçek cihazla doğrulandı. Tarama artık COMPLETE / PARTIAL verdiği veriyor.</li>
+</ol>
+<p class="small">Ayrıntı: Bölüm 6, 11.</p>
+
+<h3>Soru 2 — Tasarım kalıbı kullanıldı mı?</h3>
+<p style="margin-top:2px"><b>Evet, sekiz tane</b> — ancak hiçbiri önceden seçilip probleme uydurulmadı; her biri bir sorunu çözerken ortaya çıkıp sonradan adlandırıldı. <b>Circuit Breaker</b> (bozuk oturumda vazgeçme), <b>Watchdog</b> (ilerlemeye dayalı donma tespiti), <b>Dependency Inversion</b> (<code>IScanSink</code>: tarama bir arayüze raporlar, konsol ve SQLite onun gerçekleştirmeleridir), <b>Functional core / imperative shell</b> (karar veren kod ile donanıma dokunan kod ayrı), <b>Deferred Retry</b>, <b>Immutable records</b>, <b>Illegal states unrepresentable</b> (<code>FileKind</code>'da "bakılmadı" ile "medya değil" ayrı değerler), <b>Idempotent cleanup</b>.</p>
+<p><b>Bilinçli olarak kullanılmayanlar:</b> DI konteyneri, repository kalıbı, tek gerçekleştirmesi olan soyut arayüz, baştan sona <code>async/await</code>. Gerekçeleri Bölüm 5'te.</p>
+
+<h3>Soru 3 — Hangi testler var?</h3>
+<table style="margin-top:4px">
+<tr><th style="width:30%">Katman</th><th>Ne var</th><th style="width:22%">Ne buldu</th></tr>
+<tr><td><b>Birim testleri</b><br><span class="small">198 test · 55 ms · telefonsuz</span></td><td>Uzantı ve imza sınıflandırması (her format, yanlış pozitifler, emoji, Türkçe, uzantısız), klasör politikası (Android/data sabitlemesi, önbellek, çıkartma), devre kesici eşiği ve durum geçişleri. Test projesi kaynakları bağlayarak derlenir; COM bağımlılığı yoktur.</td><td>7 gerçek hata; 2 hatalı düzeltmeyi geri döndürdü</td></tr>
+<tr><td><b>Gerçek cihaz doğrulaması</b><br><span class="small">4 cihaz</span></td><td>Samsung A56, J7 Prime2 (SD kartlı), Turkcell T70 (ZTE), Tab S7 FE. Her düzeltme sonrası tam tarama, sayılar karşılaştırıldı. Kablo sökme-takma, port değiştirme, MTP/PTP geçişi.</td><td>PTP kaybı, port kararlılığı, soğuk önbellek</td></tr>
+<tr><td><b>Zorlamalı hata senaryosu</b><br><span class="small">PROBE_FORCE_STALL</span></td><td>Bekçi kasıtlı olarak tetiklenip iptal → geri sarma → PARTIAL yolu uçtan uca doğrulandı.</td><td>Cancel()'ın döngüyü durdurmadığı</td></tr>
+</table>
+<p class="small">Kapsanmayan: COM tarafı birim testiyle test edilemez (telefon gerekir); bu boşluk gerçek cihaz doğrulamasıyla kapatıldı. Ayrıntı: Bölüm 7.</p>
+</div>
+
+<!-- ================= 14. ENVANTER ================= -->
+<h2 class="pb"><span class="num">14</span>Kod Envanteri</h2>
+<div class="compact">
+<p class="small">Raporun yazıldığı andaki tam durum: 11 dosya, 2.945 satır. <code>PRE-SQLITE</code> etiketi, yalnızca kalıcı depolama olmadığı için var olan ve SQLite aşamasında silinecek parçaları işaretler.</p>
+
+<h3>Proje yapısı</h3>
+<pre style="font-family:Consolas,monospace;font-size:8.6pt;background:#f3f5f8;padding:10px 12px;border-radius:6px;line-height:1.35;margin:4px 0 8px">Device Probe/
+├── Device Probe/                     ← ana proje (Exe, COM referanslı)
+│   ├── Program.cs             1164   yürütme: WPD oturumu, tarama, retry, bekçi, özet
+│   ├── FileClassifier.cs       194   saf: uzantı + sihirli byte sınıflandırma
+│   ├── ConsoleScanSink.cs      102   konsol çıktısı + toplamlar
+│   ├── FolderPolicy.cs          96   saf: klasör atlama kuralları
+│   ├── SessionHealthMonitor.cs  71   saf: devre kesici
+│   ├── IScanSink.cs             68   sözleşme + ScanOutcome
+│   └── FileKind.cs              36   enum
+└── Device Probe.Tests/               ← xunit, kaynakları LINKLER, COM'suz
+    ├── FileClassifierNameTests       29 test
+    ├── FileClassifierSignatureTests  22 test
+    ├── FolderPolicyTests             17 test
+    └── SessionHealthMonitorTests     16 test   (Theory'ler açılınca toplam 198)</pre>
+<p class="small"><b>Derleme notu:</b> ana proje <code>dotnet build</code> ile derlenmez (MSB4803, COM referansı) → VS MSBuild şart. Test projesi <code>dotnet test</code> ile çalışır.</p>
+
+<h3>Program.cs — akış sırasıyla</h3>
+<table>
+<tr><th style="width:4%">#</th><th style="width:44%">Ne</th><th style="width:9%">Satır</th><th>Durum / Not</th></tr>
+<tr><td>1</td><td><code>Console.OutputEncoding = UTF8</code></td><td>10</td><td>Türkçe ad koruması, ölçüldü</td></tr>
+<tr><td>2</td><td><code>GetDevices</code> — ilk cihazı al</td><td>30-39</td><td><b>Bilinen sınırlama:</b> çoklu cihazda sessizce ilkini seçer; düzeltmesi elle yazılmış interop gerektiriyor</td></tr>
+<tr><td>3</td><td>Cihaz adı, <code>deviceId</code> yazdır</td><td>43-61</td><td><code>deviceId</code> iki USB portunda aynı ölçüldü</td></tr>
+<tr><td>4</td><td>Seri no / model / üretici key'leri</td><td>70-76</td><td>SQLite <code>device</code> tablosunun girdisi</td></tr>
+<tr><td>5</td><td><code>device.Open()</code> + client info + <code>GENERIC_READ</code></td><td>79-106</td><td>Salt okunur oturum</td></tr>
+<tr><td>6</td><td>PROPERTYKEY tanımları (name, contentType, originalFileName, size, persistentId, dateModified, deviceType)</td><td>112-195</td><td><code>PARENT_ID</code> bilerek istenmiyor (yürüyüş zaten biliyor)</td></tr>
+<tr><td>7</td><td><code>wantedProperties</code> koleksiyonu (6 key)</td><td>~185</td><td>Ölçüldü: 6 key ≈ 2 key maliyeti</td></tr>
+<tr><td>8</td><td>İmza sayaçları (<code>caughtBySignatureOnly</code>, <code>signatureChecksActuallyRun</code>, <code>signatureCheckErrors</code>)</td><td>204-214</td><td><b>PRE-SQLITE</b> (üçüncüsü yarı kalır)</td></tr>
+<tr><td>9</td><td><code>sink</code>, <code>health</code> örnekleri</td><td>216-217</td><td></td></tr>
+<tr><td>10</td><td><code>failedObjects</code> — retry çalışma kümesi (ObjectId, Path, Stage)</td><td>230</td><td>Kalır</td></tr>
+<tr><td>11</td><td><code>classifiedObjectIds</code> / <code>walkedContainerIds</code></td><td>237-242</td><td>İlki <b>PRE-SQLITE</b>, ikincisi kalır (döngü kırma)</td></tr>
+<tr><td>12</td><td><code>sessionClosed</code>, bekçi durumu (<code>lastProgressTicks</code>, <code>stallDetected</code>, <code>scanFaulted</code>, <code>scanAborted</code>)</td><td>245-256</td><td>Kalır</td></tr>
+<tr><td>13</td><td><code>filePropertyMisses</code></td><td>258-265</td><td><b>PRE-SQLITE</b>; artık sadece dosyaları sayıyor (düzeltildi, cihazda doğrulanmadı)</td></tr>
+<tr><td>14</td><td>Seri/model/üretici oku, yazdır</td><td>~268</td><td></td></tr>
+<tr><td>15</td><td><code>IsCameraMode()</code> → <code>sink.OnScanStarted(...)</code></td><td>~272</td><td>PTP tespiti; <b>zincir cihazda hiç tetiklenmedi</b></td></tr>
+<tr><td>16</td><td><code>ProcessExit</code> + <code>CancelKeyPress</code> → <code>CloseSession</code></td><td>~280</td><td></td></tr>
+<tr><td>17</td><td><code>scanTask = Task.Run(PrintTree + RunRetryPass)</code></td><td>~285</td><td></td></tr>
+<tr><td>18</td><td><b>Bekçi thread'i</b>: 45 sn ilerlemesizlik → bayrak + <code>Cancel()</code> → 20 sn → <code>FailFast</code></td><td>~290-400</td><td>Zorlamalı testle doğrulandı; gerçek kilitlenmede <code>FailFast</code> öncesi özet <b>doğrulanmadı</b></td></tr>
+<tr><td>19</td><td><code>PROBE_FORCE_STALL</code> env kancası</td><td>bekçi içinde</td><td>Bilinçli test aracı, kalıcı</td></tr>
+<tr><td>20</td><td>30 dk genel timeout + <code>Cancel()</code> + <code>FailFast</code></td><td>~360-400</td><td>Bekçi varken nadiren tetiklenir, yedek</td></tr>
+<tr><td>21</td><td><code>try/catch(AggregateException)/finally{CloseSession; OnScanFinished}</code></td><td>~400-470</td><td>Her çıkış yolunda verdi bildirilir</td></tr>
+<tr><td>22</td><td><b>Özet bloğu</b>: Done / imza istatistikleri / health / <code>[NOTE]</code> / atlanan klasörler / hata gruplama</td><td>~590-690</td><td>Tamamı <b>PRE-SQLITE</b> → <code>ConsoleScanSink</code>'e taşınacak</td></tr>
+</table>
+
+<h3>Program.cs — fonksiyonlar</h3>
+<table>
+<tr><th style="width:26%">Fonksiyon</th><th style="width:7%">Satır</th><th>Ne yapar</th><th style="width:26%">Not</th></tr>
+<tr><td><code>RunRetryPass</code></td><td>469</td><td>Başarısızları bir kez yeniden dener; klasörse yeniden yürür; kilitlenmişse atlar</td><td><code>walkedContainerIds</code>'e bakar (çift <code>OnFolder</code> düzeltildi)</td></tr>
+<tr><td><code>CloseSession</code></td><td>687</td><td>COM release zinciri + <code>device.Close()</code>, <code>Interlocked</code> ile tek kazanan</td><td>3 yoldan ulaşılır</td></tr>
+<tr><td><code>PrintTree</code></td><td>721</td><td>Özyinelemeli yürüyüş; iptal bayrağı, ilerleme sinyali, <code>FolderPolicy</code>, sink çağrıları</td><td><code>depth</code> parametresi kaldırıldı</td></tr>
+<tr><td><code>ReadDeviceString</code></td><td>842</td><td>Cihaz düzeyi string property</td><td></td></tr>
+<tr><td><code>IsCameraMode</code></td><td>863</td><td><code>WPD_DEVICE_TYPE == 1</code></td><td>Kamera=1, medya oynatıcı=2, telefon=3 ölçüldü</td></tr>
+<tr><td><code>ClassifyAndReportFile</code></td><td>895</td><td>Dedup guard → <code>FileClassifier.ClassifyByName</code> → imza → <code>sink.OnFile</code></td><td></td></tr>
+<tr><td><code>CheckSignatureWithHealthMonitoring</code></td><td>917</td><td>Devre kesici sarmalayıcısı; kapalıysa <code>Undetermined</code></td><td></td></tr>
+<tr><td><code>DetectKindBySignature</code></td><td>951</td><td><code>GetStream</code> + 12 byte döngülü okuma + <code>ClassifyBySignature</code>; <code>bytesReadPtr</code> sıfırlanır</td><td>COM olmayan hata artık taramayı öldürmez</td></tr>
+<tr><td><code>TryReadString</code> / <code>TryReadSize</code></td><td>1067 / 1078</td><td>Opsiyonel property; <code>expected</code> param ile konteynerleri saymaz</td><td></td></tr>
+<tr><td><code>GetObjectInfo</code></td><td>1089</td><td><code>GetValues</code> → <code>DeviceObject?</code> (null = başarısız)</td><td>Üç durumlu; "(unreadable)" sentineli gitti</td></tr>
+</table>
+
+<h3>Saf sınıflar</h3>
+<p><b>FileClassifier</b> (194 satır) — 4 uzantı kümesi (medya 27, ses 10, bilinen-medya-değil 22, belge 7); <code>ClassifyByName</code> → <code>FileKind?</code> (null = byte'lara bak); <code>.trashed-</code>/<code>.pending-</code> eleme; sondaki nokta/boşluk kırpma; <code>ClassifyBySignature</code> — 12 imza (JPEG, PNG, GIF, BMP+boyut, RIFF/WEBP, ftyp+uzunluk+marka, TIFF LE/BE, WebM, JXL×2, JP2, PDF); <code>Matches</code> yardımcısı.</p>
+<p><b>FolderPolicy</b> (96 satır) — <code>Android/data|obb</code> (depolama köküne sabitli, <code>/</code> ve <code>\</code>); önbellek sözlüğü (<code>.thumbnails</code>, <code>.Links</code>, <code>.wamocache</code>, <code>.Trash</code>); <code>*Sticker*</code> alt-string; null güvenli.</p>
+<p><b>SessionHealthMonitor</b> (71 satır) — 20'lik pencere, %75 eşik; <code>RecordResult</code> → tetiklenince oran döner, sonra susar; <code>RecordSkippedCheck</code>; <code>CheckingDisabled</code>, <code>SkippedBecauseDisabled</code>.</p>
+
+<h3>Sözleşme ve veri</h3>
+<p><b>IScanSink</b> — <code>OnScanStarted(id, name, camera)</code>, <code>OnFile(obj, path, kind, recovered)</code>, <code>OnFolder</code>, <code>OnFolderSkipped(path, reason)</code>, <code>OnError(ScanError)</code>, <code>OnScanFinished(ScanOutcome)</code>.<br>
+<b>ScanOutcome</b> — <code>Completed, Stalled, Faulted, CameraMode, UndeterminedFiles, SubtreeLosses</code>.<br>
+<b>ConsoleScanSink</b> — girintiyi yoldan türetir; <code>[MEDIA]/[DOC]/[UNCHECKED]/[DIR]/[SKIP]</code>; COMPLETE/PARTIAL verdiği; <code>Errors</code>/<code>SkippedFolders</code> listeleri (<b>PRE-SQLITE</b>).<br>
+<b>DeviceObject</b> — <code>ObjectId, Name, DisplayName, IsContainer, Size?, PersistentId?, ModifiedRaw?</code>.<br>
+<b>ScanError</b> — <code>ObjectId, ParentPath, Stage, HResult, Message</code>. <b>ScanStage</b> — <code>Enumerate, EnumerateNext, Properties</code>.<br>
+<b>FileKind</b> — <code>Unknown</code> (bakıldı, ilgisiz), <code>MediaFile</code>, <code>Document</code>, <code>Undetermined</code> (bakılamadı).</p>
+
+<h3>Testler (198)</h3>
+<table>
+<tr><th style="width:32%">Dosya</th><th>Kapsam</th></tr>
+<tr><td><code>FileClassifierNameTests</code> (29)</td><td>Her uzantı kategorisi; null/Unknown ayrımı; emoji, Türkçe, uzantısız, <code>.</code>/<code>..</code>, sondaki nokta/boşluk, 300 karakter; <b>tr-TR kültüründe</b> büyük/küçük harf; <code>.trashed-</code></td></tr>
+<tr><td><code>FileClassifierSignatureTests</code> (22)</td><td>Her imza; kısa tampon; sıfır tampon; yanlış pozitifler (<code>BMW service</code>, <code>RIFF WAVE</code>, <code>the ftype is</code>, M4A markası); eksik format imzaları</td></tr>
+<tr><td><code>FolderPolicyTests</code> (17)</td><td>Android kuralı sabitleme (<code>/Phone/DCIM/Android</code> atlanmaz); <code>\</code> yollar; önbellek; çıkartma; <code>.Statuses</code> atlanmaz; null; 500 seviye derin yol</td></tr>
+<tr><td><code>SessionHealthMonitorTests</code> (16)</td><td>14/20 hayır, 15/20 evet; pencere sıfırlanır; tetiklenince kalır ve susar; atlanan sayılır</td></tr>
+</table>
+<p class="small"><b>Kapsanmayan:</b> COM tarafının tamamı (PrintTree, retry, bekçi, CloseSession, GetObjectInfo, DetectKindBySignature). Telefon gerektirir.</p>
+
+<h3>Bilinen sınırlamalar (kodda yorum olarak yazılı)</h3>
+<ol>
+<li>Çoklu cihazda ilkini sessizce seçer (elle interop gerekir)</li>
+<li>Kilitlenen sürücü çağrısı süreç içinden kurtarılamaz → <code>FailFast</code> tek çıkış</li>
+<li><code>PERSISTENT_UNIQUE_ID</code> kalıcılığı belirsiz — tasarım ona güvenmiyor</li>
+<li>Tarih string olarak geliyor (<code>2026/02/18:15:44:29.000</code>), parse edilmiyor</li>
+<li>Sadece 4 cihazda denendi (3 Samsung + 1 ZTE)</li>
+</ol>
+
+<h3>Bilinçli ertelenenler</h3>
+<p><code>IDeviceObjectSource</code> + sahte cihaz · COM'un <code>WpdSession</code>'a taşınması · <code>IPortableDevicePropertiesBulk</code> · resume/kurtarma · <code>IDeviceConnection</code> · özet bloklarının sink'e taşınması (SQLite ile birlikte)</p>
+
+<h3>Doğrulanmamış</h3>
+<ul>
+<li><code>filePropertyMisses</code> 3 → 0 tahmini (cihaz yok)</li>
+<li>PTP zinciri (<code>OnScanStarted</code> uyarısı → PARTIAL/CameraMode)</li>
+<li><code>FailFast</code> öncesi özet (gerçek kilitlenme gerekir)</li>
+</ul>
+</div>
+
+<!-- ================= 15. ÇALIŞMA NOTLARI ================= -->
+<h2 class="pb"><span class="num">15</span>Çalışma Notları — Kavramlar</h2>
+<p class="small">Bu bölüm, proje boyunca karşılaşılan teknik kavramları, her birini projenin kendi koduna ve yaşanan olaylara bağlayarak açıklar. Amaç, "ne kullandık" listesinden öte, her kavramın <i>neden</i> gerektiğini ve yanlış anlaşıldığında neye mal olduğunu anlatmaktır.</p>
+
+<h3>15.1 COM — Component Object Model</h3>
+<p>Microsoft'un 1993'te tasarladığı bir sistem: bir programın, başka bir programın (veya Windows'un kendisinin) sunduğu nesneleri, hangi dille yazılmış olursa olsun, yeniden derlemeden kullanabilmesi için ortak bir kural seti.</p>
+<p><b>Benzetme:</b> standart bir elektrik prizi. Prizin şeklini ve voltajı herkes biliyor; hangi markanın fişi olursa olsun takılır, çalışır. COM da nesneler için böyle bir "priz standardı" — Windows bir yeteneği COM nesnesi olarak sunar, C# yazan da, C++ yazan da aynı prize takılır.</p>
+<p><b>Bizim projede:</b> Windows'un "USB'deki telefonla MTP üzerinden konuş" yeteneği bir COM API olarak sunuluyor — WPD (Windows Portable Devices). Kodumuzdaki şu satırların hepsi COM çağrısıdır:</p>
+<pre style="font-family:Consolas,monospace;font-size:8.8pt;background:#f3f5f8;padding:8px 12px;border-radius:6px;margin:4px 0 8px">new PortableDeviceManagerClass()   // C# 'new' gibi görünür ama Windows'a "cihaz yöneticini ver" diyor
+device.Open(deviceId, clientInfo)  // Windows'un nesnesindeki metodu çağırıyoruz
+content.EnumObjects(...)           // sürücü bunu USB üzerinden telefona iletiyor</pre>
+<p><b>Normal C#'tan dört farkı vardır ve dördü de bizi uğraştırdı:</b></p>
+<ol>
+<li><b>Çöp toplayıcı yok, referans sayacı var.</b> C#'ta nesneyi bırakırsın, çöp toplayıcı temizler. COM nesnesi "kaç kişi beni tutuyor" diye sayar; sayı sıfıra inince kendini yok eder. Sayıyı <i>bizim</i> düşürmemiz gerekir: <code>Marshal.ReleaseComObject(childIds)</code>. Unutulunca her nesnede bir COM nesnesi açılıp hiç bırakılmadı, binlerce sızıntı oluştu, oturum kilitli kaldı ve sonraki tarama "device unreachable" verdi. <code>CloseSession</code>'daki release zinciri ve sırasının önemi bundandır (ayrıntı 15.4).</li>
+<li><b>C# doğrudan konuşamıyor, çevirmen var.</b> COM'un dili C/C++ tarzıdır; .NET araya otomatik bir sarmalayıcı üretir (<code>PortableDeviceApiLib</code>). Çevirmen mükemmel değildir: <code>GetDevices</code>'ın dizi alması gerekirken <code>ref string</code> alması, <code>Next</code>'in tek seferde bir nesne dönmesi bundandır (ayrıntı 15.3).</li>
+<li><b>Hatalar sayı olarak gelir.</b> COM metodu başarısız olunca <code>0x80070141</code> gibi bir kod döndürür (HRESULT); .NET bunu <code>COMException</code>'a çevirir (ayrıntı 15.5).</li>
+<li><b>Thread kuralları vardır.</b> COM nesneleri "apartment" denen thread gruplarına aittir; yanlış gruptan çağrılınca ya çalışmaz ya da sessizce yavaşlar (ayrıntı 15.6).</li>
+</ol>
+<p><b>"COM tarafı test edilemiyor" neden:</b> bu nesneler bizim değil, Windows'un ve USB sürücüsünün. <code>PrintTree</code> çağrıldığında gerçekten bir telefonla konuşur. Sahte telefon yaratmanın yolu araya kendi arayüzümüzü koyup testte taklit etmektir; bunu tek gerçek implementasyona göre arayüz tasarlamak tahmin olacağı için erteledik. Bugün "COM tarafı" dediğimiz şey <code>Program.cs</code>'te Windows nesnelerine dokunan ~51 satır ve etrafındaki yürüyüş mantığıdır; gerisi COM bilmez ve 55 milisaniyede test edilir.</p>
+
+<h3>15.2 WPD, MTP ve PTP</h3>
+<p><b>MTP (Media Transfer Protocol)</b>, telefonun USB üzerinden konuştuğu protokoldür. Bir dosya sistemi <i>değildir</i>: telefon, her birinin opak bir kimliği olan "nesne"lerden oluşan bir ağaç sunar. Üç tür soru sorabilirsin — "X nesnesinin çocuklarını listele", "X'in özelliklerini ver", "X'in byte'larını ver" — ve her soru bir USB gidiş-dönüşüdür. Kök nesnenin adı <code>"DEVICE"</code>, altındaki ilk seviye depolama birimleridir (A56'da 1, J7'de 3).</p>
+<p><b>WPD (Windows Portable Devices)</b>, Windows'un MTP'yi programlara sunduğu COM katmanıdır. Biz MTP'yi hiç görmeyiz; WPD'nin nesnelerini çağırırız, sürücü onları MTP komutlarına çevirir.</p>
+<p><b>PTP (Picture Transfer Protocol)</b>, MTP'nin atası ve fotoğraf makineleri için tasarlanmış dar bir alt kümesidir: yalnızca durağan görüntü, klasör yapısı yok. Telefon "Görüntü aktarımı" modundayken PTP konuşur. Ölçtük: aynı J7, aynı kablo, MTP 289 dosya, PTP 222 — kaybolan 67 dosya cihazdaki bütün videolar, 42 <code>.webp</code> ve 3 PDF. Tarama ise "0 hata, sağlıklı" dedi; çünkü telefon o dosyaları listeden çıkarmıştı, biz sormamıştık bile. Bu yüzden <code>WPD_DEVICE_TYPE</code> okunur ve kamera (1) ise sonuç PARTIAL işaretlenir.</p>
+
+<h3>15.3 Interop ve çevirmen (RCW, marshalling)</h3>
+<p>.NET ile COM arasındaki köprüye <b>interop</b> denir. Derleme zamanında <code>tlbimp</code> aracı, COM tip kütüphanesini okuyup her COM arayüzü için bir C# sınıfı üretir; projedeki <code>PortableDeviceApiLib</code> ve <code>PortableDeviceTypesLib</code> bunlardır. Çalışma zamanında her COM nesnesinin yerine bir <b>RCW</b> (Runtime Callable Wrapper) durur: C# tarafında normal bir nesne gibi görünür, arkada gerçek COM nesnesine yönlendirir.</p>
+<p>Parametrelerin iki dünya arasında dönüştürülmesine <b>marshalling</b> denir. Sorun, çevirmenin her yapıyı doğru çevirememesidir. Yaşadıklarımız:</p>
+<ul>
+<li><code>GetDevices(ref string, ref uint)</code> — native imza bir <i>dizi</i> ister; çevirmen tek <code>ref string</code> üretti. Cihaz sayısını öğrenmek için dokümandaki "NULL geçir" deseni bu imzayla ifade edilemez; denedik, cihaz tespiti tamamen bozuldu. Çoklu cihaz desteği bu yüzden "elle yazılmış interop gerekir" diye bekliyor.</li>
+<li><code>IEnumPortableDeviceObjectIDs::Next</code> — aynı sebeple tek seferde bir nesne alıyoruz; batch mümkün ama elle imza ister.</li>
+<li><code>ref _tagpropertykey</code> — struct'ları referansla geçirmek COM'un beklediği şekildir; doğru çalışıyor.</li>
+<li><code>IStream</code> — tlbimp'in ürettiği versiyon değil, .NET'in <code>ComTypes.IStream</code>'i kullanılmalı; cast ederek geçiyoruz, tek RCW, ölçüldü.</li>
+</ul>
+
+<h3>15.4 Referans sayma ve kaynak temizliği</h3>
+<p>COM nesnesinin iç sayacı vardır; <code>Marshal.ReleaseComObject</code> bunu bir düşürür, sıfıra inince nesne yok olur. Bu üç kural doğurur:</p>
+<ol>
+<li><b>Her aldığını bırak, <code>finally</code> içinde.</b> <code>GetObjectInfo</code> her nesnede bir <code>IPortableDeviceValues</code> alır; <code>PrintTree</code> her klasörde bir enumerator alır. 19.000 nesnede bunlar bırakılmayınca sızıntı oluştu. <code>finally</code> bloğu, hata olsa da bırakılmasını garanti eder.</li>
+<li><b>Sıra önemlidir.</b> Oturumdan türeyen nesneler (<code>content</code>, <code>properties</code>, <code>resources</code>) önce, sonra <code>device.Close()</code>, sonra <code>device</code>, en son <code>deviceManager</code>. Tersini yapınca "COM object that has been separated from its underlying RCW cannot be used" hatası alındı — gerçekten alındı.</li>
+<li><b>Bir kez bırak.</b> <code>CloseSession</code> üç yoldan çağrılabilir (normal bitiş, Ctrl+C, süreç çıkışı). İkisi aynı anda girerse bir nesne iki kez bırakılır ya da biri kullanırken diğeri yok eder. <code>Interlocked.Exchange</code> ile yalnızca ilk giren kazanır (15.6).</li>
+</ol>
+<p>Ölçüm: süreç canlı izlendi — handle sayısı 7 dakika boyunca 284-293 arasında sabit, bellek ~10 MB büyüdü. Sızıntı yok. Bu ölçüm, kalan hataların bizim değil sürücünün olduğunu kanıtladı.</p>
+
+<h3>15.5 HRESULT ve COMException</h3>
+<p>COM metotları başarı/hata bilgisini 32 bitlik bir sayıyla döndürür. En yüksek bit 1 ise hata (<code>0x8…</code>). <code>0x8007xxxx</code> biçimi Windows'un genel hata kodlarını sarar; <code>0x802Axxxx</code> WPD'ye özgüdür. .NET, hata dönen her çağrıyı <code>COMException</code> olarak fırlatır; <code>ex.HResult</code> ile sayıya ulaşılır.</p>
+<table>
+<tr><th style="width:18%">Kod</th><th style="width:34%">Anlamı</th><th>Bizde ne zaman görüldü</th></tr>
+<tr><td><code>0x80070141</code></td><td>Cihaz erişilemez</td><td>Bozuk oturumda her imza kontrolü; DCIM listelenemediğinde</td></tr>
+<tr><td><code>0x80070079</code></td><td>Semafor zaman aşımı — cihaz cevap vermedi</td><td>Kilitlenme öncesi</td></tr>
+<tr><td><code>0x8007001F</code></td><td>Cihaz çalışmıyor (hung)</td><td>Aynı aile</td></tr>
+<tr><td><code>0x802A0006</code></td><td>E_WPD_DEVICE_IS_HUNG — literal olarak "cihaz dondu"</td><td>Aynı aile; bu kod, sorunun istek yükü olduğunu gösterdi</td></tr>
+<tr><td><code>0x800703E3</code></td><td>I/O uygulama isteğiyle iptal edildi</td><td><code>Cancel()</code> çalıştığında — yani sağlıklı cihazda iptalin işe yaradığının kanıtı</td></tr>
+</table>
+<p>Kural: <code>catch (COMException)</code> daralt, ama <i>her şeyi</i> yakalayan bir <code>catch</code> de bırakma — narrow catch, cast hatalarını (interop sorunlarını) yakalamayınca bir dosya bütün taramayı öldürdü. Şimdi COM hataları ayrı, diğerleri ayrı ele alınır.</p>
+
+<h3>15.6 Thread'ler, apartment, Interlocked ve Volatile</h3>
+<p>Bir <b>thread</b> (iş parçacığı), programın aynı anda yürüyen bir kolu. Bizde üç tane var: ana thread (bekler), tarama thread'i (<code>Task.Run</code> içinde yürür), bekçi thread'i (ilerlemeyi izler). Aynı değişkene birden fazla thread dokunduğunda üç sorun çıkar:</p>
+<ul>
+<li><b>Görünürlük:</b> bir thread'in yazdığını diğeri hemen görmeyebilir (işlemci önbelleği). <code>Volatile.Write/Read</code> bunu garanti eder; <code>scanAborted</code> bayrağı bu yüzden <code>Volatile</code> ile okunur.</li>
+<li><b>Yarış (check-then-act):</b> <code>if (!closed) { closed = true; …temizle… }</code> iki thread'de aynı anda çalışırsa ikisi de <code>false</code> görüp ikisi de temizler. <code>Interlocked.Exchange(ref x, 1) == 1</code> bunu tek atomik adımda yapar: yalnızca ilk çağıran 0 görür.</li>
+<li><b>COM apartment'ı:</b> COM nesneleri ya tek thread'e bağlı (STA) ya da serbesttir (MTA). Konsol uygulamasının ana thread'i ve thread havuzu MTA; WPD'nin CLSID'leri <code>ThreadingModel=Both</code> — ölçüldü, kayıt defterinden. Yani nesneler thread'ler arasında güvenle paylaşılır. Belirleyici olan thread'in apartment'ı değil, sunucunun kayıtlı modelidir.</li>
+</ul>
+<p>Bir ders daha: başka bir thread'den COM nesnesini <i>bırakmak</i> güvenli değildir — nesne bir çağrının ortasındayken yok edilirse access violation olur ve .NET bunu yakalayamaz. Timeout yolundaki ilk tasarım tam bunu yapıyordu; <code>Cancel()</code> tabanlı tasarıma geçildi.</p>
+
+<h3>15.7 Devre kesici (Circuit Breaker)</h3>
+<p>Elektrikteki sigortadan adını alır: bir şey sürekli başarısız oluyorsa, denemeye devam etmek yerine kes ve durumu bildir. Yazılımda Michael Nygard'ın <i>Release It!</i> kitabıyla yaygınlaşmış, Netflix Hystrix ve Polly gibi kütüphanelerle standartlaşmıştır. Bizde <code>SessionHealthMonitor</code>, elle yazılmış hali.</p>
+<p><b>Neden gerekti:</b> WPD oturumunun içerik okuma kanalı, özellik okuma kanalı sağlamken sessizce bozulabiliyor. Ölçüldü: 1607 imza kontrolünün 1606'sı "device unreachable" verdi ve tarama yine de "başarılı" bitti — 174 gerçek dosya kaçtı.</p>
+<p><b>Nasıl çalışır:</b> 20'lik pencerede hata oranı ≥ %75 ise oturum bozuk sayılır ve imza kontrolü <i>o tarama için</i> kapatılır. Kayan pencere kullanılır çünkü toplam oran, önceki başarılarla sulanıp eşiğe çok geç ulaşır. Bir kez tetiklenince açılmaz: tarama ortasında yeniden bağlanma denendi ve sonuçları bozdu (19.000 yerine 17.500 dosya), çünkü özyineleme yığınındaki enumerator'lar eski oturuma aitti.</p>
+<p><b>Kritik ayrıntı:</b> devre kesici kapalıyken atlanan dosyalar "medya değil" olarak <i>değil</i>, <code>Undetermined</code> ("bakılamadı") olarak raporlanır. Bu ayrım yokken 11.480 dosya sessizce kayboldu (simülasyon).</p>
+
+<h3>15.8 Bekçi (Watchdog)</h3>
+<p>Bir süreç canlı mı, donmuş mu — bunu izleyen ayrı bir gözcü. Bizdeki kritik tasarım kararı: bekçi <b>süreyi değil ilerlemeyi</b> izler. Sağlıklı bir soğuk tarama 5 dakika sürebilir; donmuş bir tarama da 5 dakika sürer. İkisini ayıran, ilerleme olup olmadığıdır. Tarama her nesnede bir zaman damgası yazar; bekçi 2 saniyede bir bakar, 45 saniyedir damga güncellenmediyse cihaz donmuş demektir.</p>
+<p><b>Ölçülen gerçek:</b> donmuş bir tarama 22 dakika boyunca 0,00 saniye CPU kullandı — thread sürücü çağrısının <i>içinde</i> kilitliydi. 30 dakikalık genel zaman aşımı bu durumu ayırt edemez; bekçi 45 saniyede eder.</p>
+<p><b>Kod incelemesinin bulamadığı hata:</b> bekçi ilk yazıldığında <code>device.Cancel()</code> çağırıyordu ve beş inceleme "doğru" dedi. Zorla tetiklenince tarama 4.838 nesne daha devam etti. Sebep: <code>Cancel()</code> "uçuştaki işlemi" iptal eder; tarama 14.500 küçük işlemdir, biri iptal olur döngü sonrakine geçer. Çözüm: yürüyüşün her nesnede kontrol ettiği bir dur bayrağı. Sonuç 36 nesne.</p>
+<p><b>Kurtarılamayan durum:</b> thread bir çağrının içinde donmuşsa bayrağı hiç göremez. 20 saniyelik bekleme sonrasında bekçi elindeki sayımı raporlar ve <code>Environment.FailFast</code> ile çıkar — çünkü 30 dakika beklemek güvenlik ağı değil, uzun adlı bir donmadır. <code>PROBE_FORCE_STALL</code> ortam değişkeni bu yolu bilerek tetiklemek için bırakılmış kalıcı bir test kancasıdır.</p>
+
+<h3>15.9 Dosya imzası (magic bytes)</h3>
+<p>Her dosya biçiminin kodlayıcısı, dosyanın en başına sabit bir byte dizisi yazar: JPEG <code>FF D8 FF</code>, PNG <code>89 50 4E 47</code>, PDF <code>%PDF-</code>. Uzantı bir isimdir, değiştirilebilir; imza içeriğin kendisidir. Bu yüzden uzantısı tanınmayan dosyalarda ilk 12 byte okunur.</p>
+<p><b>Pahalı olduğu için nadir yapılır:</b> bir byte okuması cihaza gerçek bir içerik isteğidir (A56'da ~13 ms, T70'te 278 ms). O yüzden önce uzantı bakılır; yalnızca gerçekten bilinmeyen uzantılarda imzaya gidilir. Bilinen-ama-ilgisiz uzantılar (<code>.txt</code>, <code>.db</code>, ses dosyaları) listelenir ki onlara hiç gidilmesin.</p>
+<p><b>Testlerin bulduğu hatalar</b> — imzanın "yeterince" değil "tam" kontrol edilmesi gerekir: BMP iki byte'la kontrol edilince <code>"BMW service log"</code> metni fotoğraf sayıldı (artık beyan edilen boyut da doğrulanır); RIFF konteynerinin 8. byte'taki alt tipi okunmayınca WAVE ses dosyaları medya sayıldı (artık yalnızca <code>WEBP</code> kabul edilir); <code>ftyp</code> kutusunun uzunluğu doğrulanmayınca <code>"the ftype is"</code> metni video sayıldı. TIFF/DNG, WebM, JPEG-XL, JP2 uzantı listesindeydi ama imzası yoktu; bozuk uzantılı bir DNG görünmezdi.</p>
+
+<h3>15.10 Birim testi ve saf fonksiyon</h3>
+<p><b>Birim testi</b>, bir fonksiyonu bilinen girdiyle çağırıp cevabın beklenen olup olmadığına bakan küçük bir kod parçasıdır. Milisaniyede çalışır, dış dünyaya (cihaz, dosya, ağ) dokunmaz.</p>
+<p><b>Saf (pure) fonksiyon</b>, aynı girdiye her zaman aynı çıktıyı veren ve yan etkisi olmayan fonksiyondur. Yalnızca saf fonksiyonlar bu şekilde test edilebilir; bir fonksiyon içinde <code>properties.GetValues(...)</code> varsa telefon olmadan çalışmaz. Projenin ilk halinde sınıflandırma mantığı böyle bir fonksiyonun içine gömülüydü — "<code>.webp</code> medya sayılıyor mu" sorusu ancak telefonu takıp 14.000 dosya tarayarak cevaplanıyordu.</p>
+<p><b>Ayrıştırma bunu değiştirdi:</b> <code>FileClassifier</code>, <code>FolderPolicy</code>, <code>SessionHealthMonitor</code> saf sınıflar oldu. 198 test 55 milisaniyede koşar. Asıl kazanç şudur: <b>telefonda üretemediğin durumları test edebilirsin.</b> Emoji'li dosya adını telefon kabul etmiyor, yani o durum gerçek cihazla test edilemezdi; saf fonksiyonla tek satır. Kullanıcının <code>DCIM/Android</code> adlı albümünün budanıp budanmadığını görmek için telefona sahte klasör kurmak gerekirdi; testle anında.</p>
+<p><b>Test projesinin yapısı:</b> ana Exe'ye referans vermez, kaynak dosyaları <i>bağlar</i> (link). Çıktısında hiçbir COM dosyası yoktur — yani "bu sınıflar saftır" iddiasını derleyici doğrular. Bir de: <code>dotnet build</code> ana projeyi derleyemez (COM referansı için VS MSBuild gerekir), ama test projesi <code>dotnet test</code> ile çalışır.</p>
+<p><b>Testler beni de düzeltti:</b> BMP'ye tek yönlü boyut sınırı koydum, test kırmızı kaldı — ASCII metin 1,7 GB gibi bir değer veriyordu, üst sınır da gerekiyordu. Sondaki noktayı uzantıdan kırptım, test kırmızı kaldı — <code>Path.GetExtension("photo.jpg.")</code> zaten boş döndüğü için ismi kırpmak gerekiyordu. Kırmızı test, yanlış düzeltmeyi üretime sokmadan yakalar.</p>
+
+<h3>15.11 Soğuk ve sıcak önbellek</h3>
+<p>Windows'un MTP sürücüsü, cihazdan okuduğu nesne bilgisini bir süre hafızasında tutar. Bağlantıdan sonraki <b>ilk tarama soğuktur</b>: her özellik gerçekten telefondan gelir, ~20 ms/çağrı, 14.500 nesne → 4-5 dakika. <b>Sonraki tarama sıcaktır</b>: sürücü hafızadan cevaplar, ~0,2 ms/çağrı, 18 saniye. Yüz kat.</p>
+<p><b>Bunun öğrettiği metodolojik ders projenin en pahalı dersiydi:</b> tarama süresi hakkında dört farklı teori kuruldu, dördü de emin bir tonla dile getirildi, dördü de yanlıştı. Hepsi aynı hatadan: iki koşunun duvar saatini karşılaştırıp farka sebep uydurmak — oysa koşular önbellek durumu bakımından farklıydı. Cevap, sürecin <i>içine</i> kronometre konunca geldi: çağrı başına süre, önbellekten etkilenmeyen tek ölçüdür. Property sayısının bedava olduğu da ancak böyle kanıtlandı (2 property 0,17 ms, 6 property 0,20 ms — aynı sıcak durumda, arka arkaya).</p>
+<p><b>Ürün için anlamı:</b> kullanıcının yaşadığı tarama her zaman soğuk olandır. Çözüm daha az property istemek değil, aynı şeyi her seferinde sıfırdan sormamaktır — yani kalıcı bir indeks (SQLite).</p>
+
+<h3>15.12 Arayüz ve bağımlılığın tersine çevrilmesi</h3>
+<p><b>Arayüz (interface)</b>, "şu metotları sağlayan herhangi bir şey" demektir; kim sağladığı önemli değildir. <code>IScanSink</code> altı metot tanımlar: tarama başladı, dosya bulundu, klasör bulundu, klasör atlandı, hata oluştu, tarama bitti.</p>
+<p><b>Bağımlılığın tersine çevrilmesi (Dependency Inversion):</b> tarama kodu <code>ConsoleScanSink</code>'e değil <code>IScanSink</code>'e bağımlıdır. Bugün konsol, yarın SQLite, sonra UI — tarama kodu değişmez. Bu dikiş olmadan bir sonraki aşamaya geçilemezdi, çünkü veritabanı ekrandan okuyamaz.</p>
+<p><b>Tasarım kararı:</b> sink, <code>Unknown</code> dosyaları da alır. Bir sink'in bir şeyi göstermemeyi seçmesi bir görüntüleme tercihidir; taramanın onu düşürmesi veri kaybıdır — ve bu proje tam olarak bu şekilde 9 kök klasör kaybetti. Bir de <code>OnScanFinished(ScanOutcome)</code>: tarama tam mı kısmi mi, bunu bilmeyen bir veritabanı yazıcısı, eksik taramayı tam sanıp "şu dosyalar silinmiş" çıkarımı yapar.</p>
+
+<h3>15.13 Değişmez veri tipleri (record)</h3>
+<p>C#'ta <code>record</code>, alanları oluşturulduktan sonra değiştirilemeyen veri taşıyıcı tanımlar. <code>DeviceObject</code>, <code>ScanError</code>, <code>ScanOutcome</code> böyledir. Değişmezlik iki şey sağlar: bir nesneyi paylaşmak güvenlidir (kimse habersiz değiştiremez), ve "bu değer nereden geldi" sorusunun tek cevabı vardır.</p>
+<p><b>Nullable'ın anlamı:</b> <code>Size?</code>, <code>ModifiedRaw?</code>, <code>PersistentId?</code> boş olabilir. "Cihaz söylemedi" bilgisi <code>null</code> ile temsil edilir; <code>0</code> ya da <code>DateTime.MinValue</code> gibi ölçülmüş gibi görünen uydurma değerlerle değil. Uydurma değer, eksik veriyi sessizce manifest'e sızdırır.</p>
+
+<h3>15.14 Git ve commit mesajı</h3>
+<p>Her commit'in mesajı, değişikliğin <i>ne</i> olduğunu değil <i>neden</i> yapıldığını ve hangi ölçümle doğrulandığını anlatır. "Fix bug" yerine: hangi girdi yanlış sonuç veriyordu, mekanizma neydi, düzeltme sonrası ölçüm ne oldu. Bunun sebebi pratiktir: altı ay sonra kodu okuyan kişi (muhtemelen sen), <i>neyin</i> değiştiğini diff'ten görür; <i>neden</i>ini yalnızca mesajdan öğrenir. Yanlış teoriler de kaydedilir — "bu koşuda şunu sandık, ölçüm çürüttü" — çünkü aynı tuzağa ikinci kez düşmemenin yolu budur.</p>
+<p>Tüm kod, yorumlar ve commit mesajları İngilizce; portföy amacıyla.</p>
+
+</body>
+</html>
