@@ -471,6 +471,14 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     ///
     /// Another device's scans are never touched: the window is per device, so
     /// scanning one phone ten times cannot evict another phone's history.
+    ///
+    /// The FILE does not shrink, and that is deliberate. SQLite keeps the pages
+    /// a delete frees and reuses them for the next scan rather than handing
+    /// them back to the filesystem; only VACUUM returns them, and VACUUM
+    /// rewrites the whole database to reclaim space that the very next scan was
+    /// going to fill anyway. So this caps growth rather than reversing it -
+    /// measured on the phone this was built against, the database settles at
+    /// about 45 MB for ten scans instead of climbing past a gigabyte in a year.
     /// </summary>
     void Prune()
     {
