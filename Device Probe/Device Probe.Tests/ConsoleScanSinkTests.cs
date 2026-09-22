@@ -27,7 +27,14 @@ public class ConsoleScanSinkTests
 
     static ScanOutcome CleanOutcome() =>
         new(Completed: true, Stalled: false, Faulted: false, CameraMode: false,
-            UndeterminedFiles: 0, SubtreeLosses: 0);
+            MediaFiles: 0, Documents: 0, UndeterminedFiles: 0, TotalFilesSeen: 0,
+            SubtreeLosses: 0, SignatureChecksRun: 0, CaughtBySignatureOnly: 0,
+            SignatureCheckErrors: 0, FilesSkippedByBreaker: 0,
+            SignatureCheckingDisabled: false, FilePropertyMisses: 0);
+
+    static DeviceIdentity Device(string friendlyName = "Galaxy A56") =>
+        new(WpdId: "dev-id", FriendlyName: friendlyName, SerialNumber: "SER123",
+            Manufacturer: "samsung", Model: "SM-A566B");
 
     static int LeadingSpaces(string line) => line.Length - line.TrimStart(' ').Length;
 
@@ -55,14 +62,10 @@ public class ConsoleScanSinkTests
     // ---- Starting state ----------------------------------------------------
 
     [Fact]
-    public void FreshSink_HasZeroCountsAndNothingRecorded()
+    public void FreshSink_HasRecordedNothing()
     {
         var sink = new ConsoleScanSink();
 
-        Assert.Equal(0, sink.TotalFilesSeen);
-        Assert.Equal(0, sink.MediaFiles);
-        Assert.Equal(0, sink.Documents);
-        Assert.Equal(0, sink.UndeterminedFiles);
         Assert.Empty(sink.Errors);
         Assert.Empty(sink.SkippedFolders);
     }
@@ -79,7 +82,6 @@ public class ConsoleScanSinkTests
         first.OnFolderSkipped("/P/.thumbnails", "cache");
         first.OnError(new ScanError("o1", "/P", ScanStage.Properties, unchecked((int)0x80070005), "denied"));
 
-        Assert.Equal(0, second.TotalFilesSeen);
         Assert.Empty(second.SkippedFolders);
         Assert.Empty(second.Errors);
     }
@@ -181,90 +183,32 @@ public class ConsoleScanSinkTests
         Assert.Equal("[DIR]  data (recovered, now walking its contents)", line.TrimStart());
     }
 
-    // ---- OnFile: counting ---------------------------------------------------
-
-    [Fact]
-    public void OnFile_CountsEveryKind_InTotalFilesSeen()
-    {
-        // Including Unknown and Undetermined. TotalFilesSeen is what the other
-        // counters are measured against; leave Unknown out of it and "17,478
-        // files, 2,300 media" silently becomes "2,300 files, 2,300 media" - a
-        // summary that reads as a clean sweep of a phone it barely looked at.
-        using var console = new ConsoleCapture();
-        var sink = new ConsoleScanSink();
-
-        sink.OnFile(FileObject("a.jpg"), "/P/a.jpg", FileKind.MediaFile, recovered: false);
-        sink.OnFile(FileObject("b.pdf"), "/P/b.pdf", FileKind.Document, recovered: false);
-        sink.OnFile(FileObject("c.db"), "/P/c.db", FileKind.Unknown, recovered: false);
-        sink.OnFile(FileObject("d.xyz"), "/P/d.xyz", FileKind.Undetermined, recovered: false);
-
-        Assert.Equal(4, sink.TotalFilesSeen);
-        Assert.Equal(1, sink.MediaFiles);
-        Assert.Equal(1, sink.Documents);
-        Assert.Equal(1, sink.UndeterminedFiles);
-    }
-
-    [Fact]
-    public void OnFile_EachCounterMovesOnlyForItsOwnKind()
-    {
-        using var console = new ConsoleCapture();
-        var sink = new ConsoleScanSink();
-
-        for (int i = 0; i < 3; i++) sink.OnFile(FileObject("m"), "/P/m", FileKind.MediaFile, recovered: false);
-        for (int i = 0; i < 2; i++) sink.OnFile(FileObject("d"), "/P/d", FileKind.Document, recovered: false);
-        for (int i = 0; i < 5; i++) sink.OnFile(FileObject("u"), "/P/u", FileKind.Unknown, recovered: false);
-        for (int i = 0; i < 7; i++) sink.OnFile(FileObject("x"), "/P/x", FileKind.Undetermined, recovered: false);
-
-        Assert.Equal(17, sink.TotalFilesSeen);
-        Assert.Equal(3, sink.MediaFiles);
-        Assert.Equal(2, sink.Documents);
-        Assert.Equal(7, sink.UndeterminedFiles);
-        // There is no Unknown counter; it is the remainder, and this is how a
-        // summary would derive it.
-        Assert.Equal(5, sink.TotalFilesSeen - sink.MediaFiles - sink.Documents - sink.UndeterminedFiles);
-    }
-
-    [Fact]
-    public void OnFile_RecoveredFlag_DoesNotChangeWhatIsCounted()
-    {
-        // Recovered or not, a media file is one media file. The flag only
-        // changes the tag printed beside it.
-        using var console = new ConsoleCapture();
-        var sink = new ConsoleScanSink();
-
-        sink.OnFile(FileObject("a.jpg"), "/P/a.jpg", FileKind.MediaFile, recovered: true);
-        sink.OnFile(FileObject("b.pdf"), "/P/b.pdf", FileKind.Document, recovered: true);
-        sink.OnFile(FileObject("c.xyz"), "/P/c.xyz", FileKind.Undetermined, recovered: true);
-        sink.OnFile(FileObject("d.db"), "/P/d.db", FileKind.Unknown, recovered: true);
-
-        Assert.Equal(4, sink.TotalFilesSeen);
-        Assert.Equal(1, sink.MediaFiles);
-        Assert.Equal(1, sink.Documents);
-        Assert.Equal(1, sink.UndeterminedFiles);
-    }
+    // Counting moved to ScanTally, which the walk owns - see ScanTallyTests.
+    // This sink renders what it is told and no longer keeps its own totals,
+    // so the screen and the database cannot report different numbers.
 
     // ---- OnFile: what is printed --------------------------------------------
 
     [Fact]
-    public void OnFile_Unknown_IsCountedButPrintsNothing()
+    public void OnFile_Unknown_PrintsNothing()
     {
-        // Thousands of app-data files on a real phone. Counted so the total is
-        // honest; not printed so the tree stays readable. Both flag values,
-        // because the recovered variant has no tag of its own to fall back to.
+        // Thousands of app-data files on a real phone. Still counted by the
+        // walk so the total is honest; not printed so the tree stays readable.
+        // Both flag values, because the recovered variant has no tag of its own
+        // to fall back to.
         using var console = new ConsoleCapture();
         var sink = new ConsoleScanSink();
 
         sink.OnFile(FileObject("index.db"), "/P/index.db", FileKind.Unknown, recovered: false);
         sink.OnFile(FileObject("index.db"), "/P/index.db", FileKind.Unknown, recovered: true);
 
-        Assert.Equal(2, sink.TotalFilesSeen);
         Assert.Equal("", console.Text);
     }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void OnFile_Undetermined_IsCountedAndPrintedAsUnchecked(bool recovered)
+    public void OnFile_Undetermined_IsPrintedAsUnchecked(bool recovered)
     {
         // The opposite of Unknown: never examined, so it MUST be visible - any
         // of these could be a photo. And there is deliberately no
@@ -275,8 +219,6 @@ public class ConsoleScanSinkTests
 
         sink.OnFile(FileObject("mystery.xyz"), "/P/mystery.xyz", FileKind.Undetermined, recovered);
 
-        Assert.Equal(1, sink.UndeterminedFiles);
-        Assert.Equal(1, sink.TotalFilesSeen);
         Assert.Equal("[UNCHECKED] mystery.xyz", console.Lines.Single().TrimStart());
     }
 
@@ -348,7 +290,7 @@ public class ConsoleScanSinkTests
     }
 
     [Fact]
-    public void OnFolder_DoesNotCountAsAFile()
+    public void OnFolder_PrintsNoFileLines()
     {
         using var console = new ConsoleCapture();
         var sink = new ConsoleScanSink();
@@ -356,7 +298,7 @@ public class ConsoleScanSinkTests
         sink.OnFolder(FolderObject("DCIM"), "/P/DCIM", recovered: false);
         sink.OnFolder(FolderObject("Camera"), "/P/DCIM/Camera", recovered: true);
 
-        Assert.Equal(0, sink.TotalFilesSeen);
+        Assert.All(console.Lines, l => Assert.Contains("[DIR]", l));
     }
 
     // ---- OnFolderSkipped ------------------------------------------------------
@@ -415,14 +357,13 @@ public class ConsoleScanSinkTests
     }
 
     [Fact]
-    public void OnFolderSkipped_DoesNotCountAsAFile()
+    public void OnFolderSkipped_IsRecordedForTheSummary()
     {
         using var console = new ConsoleCapture();
         var sink = new ConsoleScanSink();
 
         sink.OnFolderSkipped("/P/.thumbnails", "cache");
 
-        Assert.Equal(0, sink.TotalFilesSeen);
         Assert.Single(sink.SkippedFolders);
     }
 
@@ -443,7 +384,6 @@ public class ConsoleScanSinkTests
 
         Assert.Equal("", console.Text);
         Assert.Equal(new[] { error }, sink.Errors);
-        Assert.Equal(0, sink.TotalFilesSeen);
     }
 
     // ---- OnScanStarted --------------------------------------------------------
@@ -454,7 +394,7 @@ public class ConsoleScanSinkTests
         // PTP mode hides videos and documents at the phone's end, with zero
         // errors reported - the only way the user finds out is this line.
         using var console = new ConsoleCapture();
-        new ConsoleScanSink().OnScanStarted("dev-id", "Galaxy A56", cameraMode: true);
+        new ConsoleScanSink().OnScanStarted(Device(), cameraMode: true);
 
         string line = console.Lines.Single();
         Assert.StartsWith("[WARNING]", line);
@@ -467,7 +407,7 @@ public class ConsoleScanSinkTests
     public void OnScanStarted_InNormalMode_PrintsNothing()
     {
         using var console = new ConsoleCapture();
-        new ConsoleScanSink().OnScanStarted("dev-id", "Galaxy A56", cameraMode: false);
+        new ConsoleScanSink().OnScanStarted(Device(), cameraMode: false);
 
         Assert.Equal("", console.Text);
     }
@@ -502,8 +442,15 @@ public class ConsoleScanSinkTests
         int undeterminedFiles, int subtreeLosses, string expectedReasonFragment)
     {
         using var console = new ConsoleCapture();
-        new ConsoleScanSink().OnScanFinished(new ScanOutcome(
-            completed, stalled, faulted, cameraMode, undeterminedFiles, subtreeLosses));
+        new ConsoleScanSink().OnScanFinished(CleanOutcome() with
+        {
+            Completed = completed,
+            Stalled = stalled,
+            Faulted = faulted,
+            CameraMode = cameraMode,
+            UndeterminedFiles = undeterminedFiles,
+            SubtreeLosses = subtreeLosses,
+        });
 
         Assert.Contains("Scan is PARTIAL", console.Text);
         Assert.DoesNotContain("COMPLETE", console.Text);
@@ -528,9 +475,11 @@ public class ConsoleScanSinkTests
     public void OnScanFinished_EveryProblemAtOnce_ListsEachReasonExactlyOnce()
     {
         using var console = new ConsoleCapture();
-        new ConsoleScanSink().OnScanFinished(new ScanOutcome(
-            Completed: false, Stalled: true, Faulted: true, CameraMode: true,
-            UndeterminedFiles: 9, SubtreeLosses: 2));
+        new ConsoleScanSink().OnScanFinished(CleanOutcome() with
+        {
+            Completed = false, Stalled = true, Faulted = true, CameraMode = true,
+            UndeterminedFiles = 9, SubtreeLosses = 2,
+        });
 
         string[] reasons = console.Lines.Where(l => l.StartsWith("  - ")).ToArray();
         Assert.Equal(6, reasons.Length);
@@ -558,11 +507,18 @@ public class ConsoleScanSinkTests
     {
         // "0 folder(s) could not be listed" would be noise that makes real
         // reasons easier to skim past. The count lines appear only when > 0.
+        //
+        // Asserted against the reason lines rather than the whole output: the
+        // census block below always says "0 document(s) ... 0 file(s) seen",
+        // which is a different statement and belongs there.
         using var console = new ConsoleCapture();
         new ConsoleScanSink().OnScanFinished(CleanOutcome() with { Faulted = true });
 
-        Assert.DoesNotContain("folder(s)", console.Text);
-        Assert.DoesNotContain("file(s)", console.Text);
+        string[] reasons = console.Lines.Where(l => l.StartsWith("  - ")).ToArray();
+        Assert.Single(reasons);
+        Assert.Contains("stopped on an error", reasons[0]);
+        Assert.DoesNotContain(reasons, r => r.Contains("could not be listed"));
+        Assert.DoesNotContain(reasons, r => r.Contains("never examined"));
     }
 
     // ---- The whole tree, end to end -------------------------------------------
@@ -575,7 +531,7 @@ public class ConsoleScanSinkTests
         using var console = new ConsoleCapture();
         var sink = new ConsoleScanSink();
 
-        sink.OnScanStarted("dev", "Phone", cameraMode: false);
+        sink.OnScanStarted(Device("Phone"), cameraMode: false);
         sink.OnFolder(FolderObject("Phone"), "/Phone", recovered: false);
         sink.OnFolder(FolderObject("DCIM"), "/Phone/DCIM", recovered: false);
         sink.OnFolderSkipped("/Phone/DCIM/.thumbnails", "cache folder");
@@ -585,7 +541,10 @@ public class ConsoleScanSinkTests
         sink.OnFile(FileObject(".nomedia"), "/Phone/DCIM/Camera/.nomedia", FileKind.Unknown, recovered: false);
         sink.OnFolder(FolderObject("Documents"), "/Phone/Documents", recovered: true);
         sink.OnFile(FileObject("cv.pdf"), "/Phone/Documents/cv.pdf", FileKind.Document, recovered: true);
-        sink.OnScanFinished(CleanOutcome() with { UndeterminedFiles = 1 });
+        sink.OnScanFinished(CleanOutcome() with
+        {
+            MediaFiles = 1, Documents = 1, UndeterminedFiles = 1, TotalFilesSeen = 4,
+        });
 
         string nl = console.NewLine;
         string expected =
@@ -598,13 +557,16 @@ public class ConsoleScanSinkTests
             "  [DIR]  Documents (recovered, now walking its contents)" + nl +
             "    [RECOVERED-DOC] cv.pdf" + nl +
             "\nScan is PARTIAL - this is not a full picture of the device:" + nl +
-            "  - 1 file(s) were never examined (listed above as [UNCHECKED])" + nl;
+            "  - 1 file(s) were never examined (listed above as [UNCHECKED])" + nl +
+            "\nDone. 1 media file(s) and 1 document(s) found out of 4 file(s) seen." + nl +
+            "(0 of those were caught only by file signature - their extension wasn't recognized.)" + nl +
+            "Expensive signature check actually ran on 0 file(s) (out of 4 total)." + nl +
+            "Signature check itself errored (not just 'no match') on 0 file(s)." + nl +
+            "Session health: OK, signature checking ran normally for the whole scan." + nl +
+            "\n1 folder(s) deliberately not walked:" + nl +
+            "  /Phone/DCIM/.thumbnails - cache folder" + nl;
 
         Assert.Equal(expected, console.Text);
-        Assert.Equal(4, sink.TotalFilesSeen);
-        Assert.Equal(1, sink.MediaFiles);
-        Assert.Equal(1, sink.Documents);
-        Assert.Equal(1, sink.UndeterminedFiles);
         Assert.Equal(new[] { "/Phone/DCIM/.thumbnails - cache folder" }, sink.SkippedFolders);
     }
 }
