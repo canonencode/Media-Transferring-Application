@@ -30,3 +30,6 @@ artifacts/
 # Windows
 Thumbs.db
 desktop.ini
+
+# Claude Code agent worktrees (local scratch)
+.claude/
