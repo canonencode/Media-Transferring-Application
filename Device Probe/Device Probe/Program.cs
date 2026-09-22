@@ -201,8 +201,15 @@ var folderType = new Guid(0x27E2E392, 0xA111, 0x48E0, 0xAB, 0x0C, 0xE1, 0x77, 0x
 // something we need to step into to reach the real folders underneath.
 var functionalObjectType = new Guid(0x99ED0160, 0x17FF, 0x4C44, 0x9D, 0x98, 0x1D, 0x7A, 0x6F, 0x94, 0x19, 0x21);
 
+// PRE-SQLITE: caughtBySignatureOnly and signatureChecksActuallyRun become a
+// file.classified_by column plus a COUNT query; both counters go.
 int caughtBySignatureOnly = 0;
 int signatureChecksActuallyRun = 0;
+// PRE-SQLITE: signatureCheckErrors does TWO jobs. As a summary statistic it goes
+// (a scan_error row, stage=Stream, replaces it). As the circuit breaker's error
+// signal - the errorsBefore/after snapshot in CheckSignatureWithHealthMonitoring -
+// it stays, but should become a bool returned by DetectKindBySignature rather
+// than a global that the caller diffs.
 int signatureCheckErrors = 0;
 
 // The walk no longer prints anything. It reports to a sink, which is what lets
@@ -227,6 +234,10 @@ var failedObjects = new List<(string ObjectId, string Path, ScanStage Stage)>();
 // the double-counting bug: the main walk claimed an object's ID before it knew
 // whether the object was even readable, while the retry pass classified that
 // same object through a path that never consulted the set.
+// PRE-SQLITE: classifiedObjectIds goes. A UNIQUE(device_id, path) constraint with
+// upsert makes writing the same file twice idempotent, so the retry re-walk no
+// longer needs an in-memory guard. walkedContainerIds STAYS - it breaks cycles
+// during the walk itself, where a database cannot help.
 var classifiedObjectIds = new HashSet<string>();  // files already counted
 var walkedContainerIds = new HashSet<string>();   // folders already enumerated; also breaks cycles
 
@@ -244,26 +255,13 @@ bool scanFaulted = false;
 // have no bool overloads; 1 means "stop walking, the device is gone".
 int scanAborted = 0;
 
-// SCAFFOLDING (remove once the timing question is closed): answers "where does
-// a scan's time actually go?"
-// Where the time actually goes. Added because three separate attempts to
-// explain this scan's duration by comparing wall-clock between runs all
-// reached different, confident, wrong conclusions - the runs differed in
-// driver cache state, not in what we asked for. Measuring inside the process
-// removes the guesswork: one run now says how much time went into property
-// reads versus folder listing versus content streams.
-var timeInGetValues = new System.Diagnostics.Stopwatch();
-var timeInEnumObjects = new System.Diagnostics.Stopwatch();
-var timeInGetStream = new System.Diagnostics.Stopwatch();
-int getValuesCalls = 0;
-int enumObjectsCalls = 0;
-
-// SCAFFOLDING (fold into the scan_errors table when SQLite lands).
-// A property the device refuses is NOT the same as a property it does not have,
-// and collapsing both into null hid real driver failures behind "no data".
-// Coverage on the A56 is 100%, so in practice any of these now means something
-// genuinely went wrong and deserves to be visible.
-int suppressedPropertyErrors = 0;
+// PRE-SQLITE: becomes a scan_error row (stage=Properties, informational); this counter goes.
+// Counts a FILE lacking a property the device otherwise supplies for every file.
+// Containers are excluded on purpose: the storage root has no filename, size or
+// modified date, and counting it produced a constant "3 errors" on every scan
+// of every device - which the summary then called "likely real driver errors".
+// It was one object, missing the three things a container never has.
+int filePropertyMisses = 0;
 
 
 string? serialNumber = ReadDeviceString(serialKey);
@@ -598,6 +596,9 @@ if (failedObjects.Count > 0)
 }
 }
 
+// PRE-SQLITE: this whole summary (totals, signature stats, health) becomes a
+// query. For the console probe it moves into ConsoleScanSink.OnScanFinished,
+// which already holds the data; nothing here should stay in Program.cs.
 Console.WriteLine($"\nDone. {sink.MediaFiles} media file(s) and {sink.Documents} document(s) found out of {sink.TotalFilesSeen} file(s) seen.");
 Console.WriteLine($"({caughtBySignatureOnly} of those were caught only by file signature - their extension wasn't recognized.)");
 Console.WriteLine($"Expensive signature check actually ran on {signatureChecksActuallyRun} file(s) (out of {sink.TotalFilesSeen} total).");
@@ -612,36 +613,15 @@ Console.WriteLine(health.CheckingDisabled
     ? "Session health: signature checking was DISABLED partway through this scan (see warning above)."
     : "Session health: OK, signature checking ran normally for the whole scan.");
 
-// SCAFFOLDING (remove with the stopwatches above).
-// Where the scan's time actually went, measured inside the process rather than
-// inferred by comparing one run's wall clock against another's. This is the
-// only honest way to answer "are extra properties expensive?" - the runs we
-// were comparing differed in driver cache state, not in request shape.
-long totalMs = timeInGetValues.ElapsedMilliseconds + timeInEnumObjects.ElapsedMilliseconds
-    + timeInGetStream.ElapsedMilliseconds;
-if (stallDetected)
+if (filePropertyMisses > 0)
 {
-    Console.WriteLine($"\n[IMPORTANT] This scan was CUT SHORT: the device stopped responding and did not " +
-        "recover. Everything above is partial - an unknown number of files were never reached. Unplug and " +
-        "replug the phone, then scan again; the results of this run should not be treated as a complete " +
-        "picture of what is on the device.");
+    Console.WriteLine($"\n[NOTE] {filePropertyMisses} file(s) were missing a property (name, size or date) that " +
+        "this device otherwise supplies for every file. Containers are not counted here, so each of these is " +
+        "a genuine gap worth a look.");
 }
 
-Console.WriteLine($"\nTime spent inside device calls ({totalMs:N0} ms total):");
-Console.WriteLine($"  {timeInGetValues.ElapsedMilliseconds,9:N0} ms  GetValues      ({getValuesCalls:N0} calls, " +
-    $"{(getValuesCalls > 0 ? timeInGetValues.Elapsed.TotalMilliseconds / getValuesCalls : 0):F2} ms each)");
-Console.WriteLine($"  {timeInEnumObjects.ElapsedMilliseconds,9:N0} ms  EnumObjects    ({enumObjectsCalls:N0} calls, " +
-    $"{(enumObjectsCalls > 0 ? timeInEnumObjects.Elapsed.TotalMilliseconds / enumObjectsCalls : 0):F2} ms each)");
-Console.WriteLine($"  {timeInGetStream.ElapsedMilliseconds,9:N0} ms  content streams ({signatureChecksActuallyRun:N0} signature checks)");
-Console.WriteLine("  (EnumObjects excludes the per-item Next() calls, which are part of the walk itself.)");
-
-if (suppressedPropertyErrors > 0)
-{
-    Console.WriteLine($"\n[NOTE] {suppressedPropertyErrors} optional property read(s) failed and were treated as " +
-        "\"not supplied\". Coverage is normally 100% on this device, so these are likely real driver errors " +
-        "rather than missing data.");
-}
-
+// PRE-SQLITE: becomes the scan_skipped_folder table. The console rendering
+// moves into ConsoleScanSink; this block leaves Program.cs.
 if (sink.SkippedFolders.Count > 0)
 {
     Console.WriteLine($"\n{sink.SkippedFolders.Count} folder(s) deliberately not walked:");
@@ -651,6 +631,8 @@ if (sink.SkippedFolders.Count > 0)
     }
 }
 
+// PRE-SQLITE: becomes the scan_error table plus a GROUP BY. The console
+// rendering moves into ConsoleScanSink; this block leaves Program.cs.
 // Errors grouped by which call failed and why, instead of a flat count plus
 // the first ten messages. The breakdown is the point: an Enumerate/Next
 // failure loses a whole subtree while a Properties failure loses one object,
@@ -743,10 +725,7 @@ void PrintTree(string objectId, string parentPath)
     IEnumPortableDeviceObjectIDs? childIds = null;
     try
     {
-        enumObjectsCalls++;
-        timeInEnumObjects.Start();
-        try { content.EnumObjects(0, objectId, null, out childIds); }
-        finally { timeInEnumObjects.Stop(); }
+        content.EnumObjects(0, objectId, null, out childIds);
     }
     catch (System.Runtime.InteropServices.COMException ex)
     {
@@ -976,9 +955,7 @@ FileKind DetectKindBySignature(string objectId)
     IntPtr bytesReadPtr = IntPtr.Zero;
     try
     {
-        timeInGetStream.Start();
-        try { resources.GetStream(objectId, ref resourceDefaultKey, 0 /* STGM_READ */, ref optimalTransferSize, out wpdStream); }
-        finally { timeInGetStream.Stop(); }
+        resources.GetStream(objectId, ref resourceDefaultKey, 0 /* STGM_READ */, ref optimalTransferSize, out wpdStream);
 
         var stream = (System.Runtime.InteropServices.ComTypes.IStream)wpdStream;
 
@@ -1001,9 +978,7 @@ FileKind DetectKindBySignature(string objectId)
             // Buffer.BlockCopy throw, and a garbage small one silently
             // corrupted the header we then classified on.
             System.Runtime.InteropServices.Marshal.WriteInt32(bytesReadPtr, 0);
-            timeInGetStream.Start();
-            try { stream.Read(chunk, chunk.Length, bytesReadPtr); }
-            finally { timeInGetStream.Stop(); }
+            stream.Read(chunk, chunk.Length, bytesReadPtr);
 
             int got = System.Runtime.InteropServices.Marshal.ReadInt32(bytesReadPtr);
             if (got <= 0) break; // end of stream - the file is simply shorter than 12 bytes
@@ -1085,26 +1060,30 @@ FileKind DetectKindBySignature(string objectId)
 // A property the device chose not to supply comes back as a COMException from
 // the individual getter, not from GetValues itself. Absence is data, not an
 // error, so it is never recorded in scanErrors.
-string? TryReadString(IPortableDeviceValues values, ref _tagpropertykey key)
+// `expected` says whether a missing value is worth counting. A container has
+// no filename, size or modified date to give, so its misses are normal and are
+// not counted; only a FILE lacking a property the device otherwise supplies
+// 100% of the time is worth surfacing.
+string? TryReadString(IPortableDeviceValues values, ref _tagpropertykey key, bool expected)
 {
     try
     {
         values.GetStringValue(ref key, out string value);
         return string.IsNullOrEmpty(value) ? null : value;
     }
-    catch (System.Runtime.InteropServices.COMException) { suppressedPropertyErrors++; return null; }
-    catch (InvalidCastException) { suppressedPropertyErrors++; return null; } // stored as another VARTYPE
+    catch (System.Runtime.InteropServices.COMException) { if (expected) filePropertyMisses++; return null; }
+    catch (InvalidCastException) { if (expected) filePropertyMisses++; return null; } // stored as another VARTYPE
 }
 
-ulong? TryReadSize(IPortableDeviceValues values, ref _tagpropertykey key)
+ulong? TryReadSize(IPortableDeviceValues values, ref _tagpropertykey key, bool expected)
 {
     try
     {
         values.GetUnsignedLargeIntegerValue(ref key, out ulong value);
         return value;
     }
-    catch (System.Runtime.InteropServices.COMException) { suppressedPropertyErrors++; return null; }
-    catch (InvalidCastException) { suppressedPropertyErrors++; return null; }
+    catch (System.Runtime.InteropServices.COMException) { if (expected) filePropertyMisses++; return null; }
+    catch (InvalidCastException) { if (expected) filePropertyMisses++; return null; }
 }
 
 DeviceObject? GetObjectInfo(string objectId, string parentPath)
@@ -1112,10 +1091,7 @@ DeviceObject? GetObjectInfo(string objectId, string parentPath)
     IPortableDeviceValues? values = null;
     try
     {
-        getValuesCalls++;
-        timeInGetValues.Start();
-        try { properties.GetValues(objectId, wantedProperties, out values); }
-        finally { timeInGetValues.Stop(); }
+        properties.GetValues(objectId, wantedProperties, out values);
 
         // Only these two are required. GetValues reports per-property failures
         // inside the returned collection rather than failing the whole call, so
@@ -1125,10 +1101,11 @@ DeviceObject? GetObjectInfo(string objectId, string parentPath)
         values.GetGuidValue(ref contentTypeKey, out Guid contentType);
         bool isContainer = contentType == folderType || contentType == functionalObjectType;
 
-        string? originalFileName = TryReadString(values, ref originalFileNameKey);
-        string? persistentId = TryReadString(values, ref persistentIdKey);
-        string? modified = TryReadString(values, ref dateModifiedKey);
-        ulong? size = TryReadSize(values, ref sizeKey);
+        bool expected = !isContainer;
+        string? originalFileName = TryReadString(values, ref originalFileNameKey, expected);
+        string? persistentId = TryReadString(values, ref persistentIdKey, expected);
+        string? modified = TryReadString(values, ref dateModifiedKey, expected);
+        ulong? size = TryReadSize(values, ref sizeKey, expected);
 
         return new DeviceObject(
             objectId,

@@ -9,6 +9,9 @@ sealed class ConsoleScanSink : IScanSink
     public int UndeterminedFiles { get; private set; }
     public int Documents { get; private set; }
     public int TotalFilesSeen { get; private set; }
+    // PRE-SQLITE: these two lists exist so the console can print a grouped
+    // summary at the end. A SqliteScanSink writes each item as a row on arrival
+    // and keeps nothing; these stay only as this sink's own rendering state.
     public List<ScanError> Errors { get; } = new();
     public List<string> SkippedFolders { get; } = new();
 
