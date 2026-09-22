@@ -264,6 +264,27 @@ public class SessionHealthMonitorTests
     }
 
     [Fact]
+    public void SkipsRecordedBeforeAnyResult_LeaveTheBreakerHealthy_AndTheBatchEmpty()
+    {
+        // RecordSkippedCheck is only meaningful after a trip, but nothing stops
+        // a caller invoking it first. It must neither trip the breaker nor
+        // pre-fill the batch: after 50 skips, the first 19 real results must
+        // still be silent and the 20th must be the one that decides.
+        var monitor = new SessionHealthMonitor();
+        for (int i = 0; i < 50; i++) monitor.RecordSkippedCheck();
+
+        Assert.False(monitor.CheckingDisabled);
+        Assert.Equal(50, monitor.SkippedBecauseDisabled);
+
+        Assert.Null(Feed(monitor, BatchSize - 1, errored: true));
+        Assert.False(monitor.CheckingDisabled);
+
+        Assert.NotNull(monitor.RecordResult(errored: true));
+        Assert.True(monitor.CheckingDisabled);
+        Assert.Equal(50, monitor.SkippedBecauseDisabled);
+    }
+
+    [Fact]
     public void MonitorsAreIndependentOfEachOther()
     {
         // No static state: two scans in one process must not share a breaker.

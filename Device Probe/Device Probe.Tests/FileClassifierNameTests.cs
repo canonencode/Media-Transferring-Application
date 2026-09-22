@@ -299,6 +299,26 @@ public class FileClassifierNameTests
         Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyByName("trashed-holiday.jpg"));
     }
 
+    [Theory]
+    [InlineData(".TRASHED-1699999999-IMG_0042.jpg")]        // case
+    [InlineData(".Pending-1699999999-IMG_0043.mp4")]
+    [InlineData("DCIM/Camera/.trashed-1699999999-IMG_0042.jpg")]  // the prefix is on the FILE name, not the path
+    [InlineData(@"DCIM\Camera\.pending-1699999999-IMG_0043.jpg")]
+    public void TrashedAndPendingPrefixes_MatchCaseInsensitively_OnTheFileNameOnly(string name)
+        => Assert.Equal(FileKind.Unknown, FileClassifier.ClassifyByName(name));
+
+    [Fact]
+    public void TrashedPrefix_RequiresTheHyphen_SoSimilarNamesAreNotSwallowed()
+    {
+        // ".trashed-<timestamp>-" is Android's exact scheme. A file that merely
+        // starts with ".trashed" (no hyphen) is somebody's own dotfile, and its
+        // extension must still be what decides it - swallowing it would be a
+        // silent loss of a real photo.
+        Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyByName(".trashed.jpg"));
+        Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyByName(".trashedIMG.jpg"));
+        Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyByName(".pending.jpg"));
+    }
+
     [Fact]
     public void LeadingAndInternalSpaces_DoNotAffectTheExtension()
     {

@@ -1,4 +1,4 @@
-﻿/// <summary>
+/// <summary>
 /// Tests for <c>FileClassifier.ClassifyBySignature</c> - the fallback that runs
 /// only when the extension was unrecognised, and the only thing standing
 /// between a photo with a strange extension and being silently dropped.
@@ -22,8 +22,11 @@ public class FileClassifierSignatureTests
     public void SignatureBytes_IsTwelve()
     {
         // Pinned because the caller allocates its read buffer from this
-        // constant and the ftyp check indexes byte 7; shrinking it below 8
-        // would turn that check into an out-of-range read.
+        // constant, and two checks read all the way to byte 11: the RIFF
+        // subtype ("WEBP" at 8..11) and the ftyp major brand (at 8..11, which
+        // is what rejects audio-only MP4). Shrink it below 12 and those checks
+        // fail closed via Matches' length guard - every WEBP and MP4 with an
+        // unrecognised extension would silently become Unknown.
         Assert.Equal(12, FileClassifier.SignatureBytes);
     }
 
@@ -77,8 +80,10 @@ public class FileClassifierSignatureTests
     public void FtypBoxAtOffsetFour_IsMediaFile()
     {
         // The MP4 family: a big-endian box length, then "ftyp", then the brand.
-        // Covers MP4, MOV (qt  ), 3GP and HEIC, which all share this layout -
-        // the brand itself is deliberately not inspected.
+        // Covers MP4, MOV (qt  ), 3GP and HEIC, which all share this layout.
+        // The brand IS inspected, but only to reject the three audio-only ones
+        // (see FtypBox_NeedsAPlausibleLengthAndANonAudioBrand); every video
+        // and image brand passes without being enumerated.
         byte[] mp4 = { 0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6D, 0x70, 0x34, 0x32 }; // "mp42"
         byte[] mov = { 0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20 }; // "qt  "
         byte[] heic = { 0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63 }; // "heic"
@@ -129,19 +134,50 @@ public class FileClassifierSignatureTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
-    [InlineData(2)]   // enough for the "BM" test, but must still be rejected
-    [InlineData(4)]   // enough for PNG/GIF/RIFF, but must still be rejected
-    [InlineData(8)]   // enough for ftyp, but must still be rejected
+    [InlineData(2)]   // enough for the "JXL codestream" test (FF 0A), but must still be rejected
+    [InlineData(4)]   // enough for PNG/GIF/EBML, but must still be rejected
+    [InlineData(8)]   // enough for the ftyp box-length test, but must still be rejected
     [InlineData(11)]
     public void AnyBufferBelowTwelveBytes_IsUnknown(int length)
     {
         // Each length here is long enough for at least one of the individual
-        // checks to have matched if the length guard were dropped. "BM" as the
-        // first two bytes of a 2-byte buffer is the sharpest case.
+        // checks to have matched if the length guard were dropped. FF 0A as
+        // the whole of a 2-byte buffer is the sharpest case: it is a complete,
+        // valid JPEG XL codestream signature.
         var buffer = new byte[length];
-        if (length >= 2) { buffer[0] = 0x42; buffer[1] = 0x4D; }
+        if (length >= 2) { buffer[0] = 0xFF; buffer[1] = 0x0A; }
 
         Assert.Equal(FileKind.Unknown, FileClassifier.ClassifyBySignature(buffer));
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 0xFF, 0xD8, 0xFF, 0xE1 }, (int)FileKind.MediaFile)]                                     // JPEG
+    [InlineData(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }, (int)FileKind.MediaFile)]             // PNG
+    [InlineData(new byte[] { 0x47, 0x49, 0x46, 0x38, 0x39, 0x61 }, (int)FileKind.MediaFile)]                         // GIF
+    [InlineData(new byte[] { 0x42, 0x4D, 0x36, 0x04, 0x00, 0x00 }, (int)FileKind.MediaFile)]                         // BMP
+    [InlineData(new byte[] { 0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50 }, (int)FileKind.MediaFile)] // RIFF WEBP
+    [InlineData(new byte[] { 0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45 }, (int)FileKind.Unknown)]   // RIFF WAVE
+    [InlineData(new byte[] { 0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D }, (int)FileKind.MediaFile)] // ftyp isom
+    [InlineData(new byte[] { 0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x4D, 0x34, 0x41, 0x20 }, (int)FileKind.Unknown)]   // ftyp M4A
+    [InlineData(new byte[] { 0x49, 0x49, 0x2A, 0x00 }, (int)FileKind.MediaFile)]                                     // TIFF LE
+    [InlineData(new byte[] { 0x4D, 0x4D, 0x00, 0x2A }, (int)FileKind.MediaFile)]                                     // TIFF BE
+    [InlineData(new byte[] { 0x1A, 0x45, 0xDF, 0xA3 }, (int)FileKind.MediaFile)]                                     // EBML
+    [InlineData(new byte[] { 0xFF, 0x0A }, (int)FileKind.MediaFile)]                                                 // JXL codestream
+    [InlineData(new byte[] { 0, 0, 0, 0x0C, 0x4A, 0x58, 0x4C, 0x20 }, (int)FileKind.MediaFile)]                      // JXL container
+    [InlineData(new byte[] { 0, 0, 0, 0x0C, 0x6A, 0x50, 0x20, 0x20 }, (int)FileKind.MediaFile)]                      // JPEG 2000
+    [InlineData(new byte[] { 0x25, 0x50, 0x44, 0x46, 0x2D }, (int)FileKind.Document)]                                // PDF
+    public void EverySignature_GivesTheSameAnswerInALongBufferWithNoiseAfterTheHeader(byte[] leading, int expected)
+    {
+        // The caller may hand over more than SignatureBytes - a reader that
+        // pulls a whole first block, say. Nothing past byte 11 may influence
+        // the answer, so the tail is filled with a non-zero pattern rather than
+        // the zeros a fresh array would have. A check that accidentally read
+        // past its signature would start disagreeing here.
+        var buffer = new byte[4096];
+        Array.Fill(buffer, (byte)0xAB, FileClassifier.SignatureBytes, buffer.Length - FileClassifier.SignatureBytes);
+        leading.CopyTo(buffer, 0);
+
+        Assert.Equal((FileKind)expected, FileClassifier.ClassifyBySignature(buffer));
     }
 
     [Fact]
@@ -262,6 +298,70 @@ public class FileClassifierSignatureTests
         Assert.Equal(FileKind.Unknown, FileClassifier.ClassifyBySignature(asciiCoincidence));
         Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyBySignature(mp4));
         Assert.Equal(FileKind.Unknown, FileClassifier.ClassifyBySignature(m4a));
+    }
+
+    [Theory]
+    [InlineData("M4A ")]
+    [InlineData("M4B ")]
+    [InlineData("M4P ")]
+    public void FtypBox_EveryAudioOnlyBrand_IsRejected(string brand)
+    {
+        // Only M4A was covered; M4B (audiobooks) and M4P (iTunes-protected) are
+        // the same trap with a different brand string. Note the trailing space
+        // - a brand is exactly four bytes.
+        var header = new byte[] { 0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0, 0, 0, 0 };
+        System.Text.Encoding.ASCII.GetBytes(brand).CopyTo(header, 8);
+
+        Assert.Equal(FileKind.Unknown, FileClassifier.ClassifyBySignature(header));
+    }
+
+    [Theory]
+    [InlineData(0x0004, (int)FileKind.Unknown)]    // below the 8-byte minimum a box header itself needs
+    [InlineData(0x0008, (int)FileKind.MediaFile)]  // the minimum: header with no brands at all
+    [InlineData(0x0018, (int)FileKind.MediaFile)]  // the common real value (24)
+    [InlineData(0x001A, (int)FileKind.Unknown)]    // 26: in range but not 4-aligned
+    [InlineData(0x0400, (int)FileKind.MediaFile)]  // 1024: the upper bound, inclusive
+    [InlineData(0x0404, (int)FileKind.Unknown)]    // 1028: just over
+    [InlineData(0x7468_6520, (int)FileKind.Unknown)] // "the " read as a length
+    public void FtypBox_LengthBounds_ArePinnedExactly(int boxLength, int expected)
+    {
+        // The plausibility rule is >= 8, <= 1024, multiple of 4. Each edge is
+        // pinned so that loosening any one of them - which is how the "the
+        // ftype is" false positive got in - shows up as a failure here.
+        var header = new byte[12];
+        header[0] = (byte)(boxLength >> 24); header[1] = (byte)(boxLength >> 16);
+        header[2] = (byte)(boxLength >> 8);  header[3] = (byte)boxLength;
+        "ftypisom"u8.CopyTo(header.AsSpan(4));
+
+        Assert.Equal((FileKind)expected, FileClassifier.ClassifyBySignature(header));
+    }
+
+    [Theory]
+    [InlineData(0x0000_000Du, (int)FileKind.Unknown)]   // 13: one short of the 14-byte header
+    [InlineData(0x0000_000Eu, (int)FileKind.MediaFile)] // 14: the minimum
+    [InlineData(0x1FFF_FFFFu, (int)FileKind.MediaFile)] // just under the ceiling
+    [InlineData(0x2000_0000u, (int)FileKind.Unknown)]   // the ceiling itself is out
+    [InlineData(0x6573_2057u, (int)FileKind.Unknown)]   // "W se" - what "BMW service" declares
+    public void Bmp_DeclaredSizeBounds_ArePinnedExactly(uint declaredSize, int expected)
+    {
+        // Little-endian at offset 2. Both bounds matter (see the classifier's
+        // own comment); each one is pinned at its exact edge.
+        var header = new byte[12];
+        header[0] = 0x42; header[1] = 0x4D;
+        header[2] = (byte)declaredSize;         header[3] = (byte)(declaredSize >> 8);
+        header[4] = (byte)(declaredSize >> 16); header[5] = (byte)(declaredSize >> 24);
+
+        Assert.Equal((FileKind)expected, FileClassifier.ClassifyBySignature(header));
+    }
+
+    [Fact]
+    public void JpegXlInAnIsoBmffContainer_IsMediaFile()
+    {
+        // The other JXL form: a 12-byte "JXL " signature box, the same shape
+        // as JPEG 2000's "jP  " box. It was in the classifier with no test.
+        byte[] jxlBox = { 0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A };
+
+        Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyBySignature(jxlBox));
     }
 
     [Fact]

@@ -71,10 +71,36 @@ public class FolderPolicyTests
     public void FolderWhoseNameMerelyEndsInAndroid_DoesNotTriggerTheRule()
     {
         // "/Internal storage/MyAndroid" must not be read as ".../Android".
-        // The leading slash in the EndsWith comparison is what prevents it, so
-        // this test is really guarding that slash.
+        // The rule compares the last path SEGMENT for equality (it used to be
+        // an EndsWith on "/Android", where the leading slash did this job), so
+        // this test is really guarding that it stays a whole-segment match and
+        // never degrades to a suffix or substring one.
         Assert.False(Skip("/Internal storage/MyAndroid", "data"));
         Assert.False(Skip("/Internal storage/NotAndroid", "obb"));
+        Assert.False(Skip("/Internal storage/Androids", "data"));
+    }
+
+    [Fact]
+    public void TrailingOrDoubledSeparators_DoNotDefeatTheAndroidRule()
+    {
+        // Empty segments are dropped before counting, so a stray separator
+        // cannot push the real Android folder to "three segments deep" and
+        // make it look like somebody's own album.
+        Assert.True(Skip("/Internal storage/Android/", "data"));
+        Assert.True(Skip("//Internal storage//Android", "obb"));
+        Assert.True(Skip("/Internal storage/Android//", "data"));
+    }
+
+    [Fact]
+    public void NullArguments_AreNotSkipped_AndLeaveReasonEmpty()
+    {
+        // The policy guards null explicitly rather than throwing. Failing OPEN
+        // is the right direction here: an unexpected null from the device
+        // layer should cost a walk, never silently lose a subtree.
+        Assert.False(FolderPolicy.ShouldSkip(null!, "data", out string reason1));
+        Assert.Equal("", reason1);
+        Assert.False(FolderPolicy.ShouldSkip("/Internal storage/Android", null!, out string reason2));
+        Assert.Equal("", reason2);
     }
 
     [Fact]
@@ -115,6 +141,62 @@ public class FolderPolicyTests
         Assert.False(Skip("/Phone/DCIM", "Screenshots"));
         Assert.False(Skip("/Phone/WhatsApp/Media", "WhatsApp Images"));
         Assert.False(Skip("/Phone/DCIM", "Camera"));
+    }
+
+    [Theory]
+    [InlineData("WhatsApp Stickers")]
+    [InlineData("STICKERS")]
+    [InlineData("MyStickerPack")]   // substring, mid-word
+    public void StickerFolders_ReasonSaysStickers_NotCacheOrAndroid(string name)
+    {
+        // The reason is printed beside every [SKIP] line. A user seeing their
+        // sticker folder skipped must read "stickers", not one of the other
+        // two explanations - each rule has its own message and they must not
+        // bleed into each other.
+        string reason = Reason("/Phone/WhatsApp/Media", name);
+
+        Assert.Contains("stickers", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("cache", reason);
+        Assert.DoesNotContain("Android", reason);
+    }
+
+    [Fact]
+    public void EachRule_HasItsOwnDistinctReason()
+    {
+        // Three rules, three messages. If two ever collapsed into one string
+        // the user would lose the ability to tell "deleted on purpose" from
+        // "derived copies" from "the OS blocks this".
+        string android = Reason("/Phone/Android", "data");
+        string cache = Reason("/Phone/DCIM", ".thumbnails");
+        string trash = Reason("/Phone", ".Trash");
+        string sticker = Reason("/Phone/WhatsApp", "Stickers");
+
+        Assert.Equal(4, new[] { android, cache, trash, sticker }.Distinct().Count());
+    }
+
+    [Fact]
+    public void MatchingSurvivesTurkishCulture()
+    {
+        // Every one of the three rules has an 'I' in its match string
+        // ("Android", ".Links", "Sticker"). Under tr-TR a culture-sensitive
+        // ignore-case comparison maps 'I' to dotless U+0131 and none of them
+        // would match their uppercase form, so on a Turkish machine
+        // /ANDROID/DATA would be walked and .LINKS would be enumerated at
+        // ~118ms per object. This is what proves the comparer is ordinal.
+        System.Globalization.CultureInfo original = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("tr-TR");
+
+            Assert.True(Skip("/Internal storage/ANDROID", "DATA"));
+            Assert.True(Skip("/Internal storage", ".LINKS"));
+            Assert.True(Skip("/Internal storage", ".THUMBNAILS"));
+            Assert.True(Skip("/Internal storage/WhatsApp", "STICKERS"));
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = original;
+        }
     }
 
     // ---- Cache / derived-copy folders --------------------------------------
@@ -217,7 +299,11 @@ public class FolderPolicyTests
         // A folder whose name merely contains a skippable one.
         Assert.False(Skip("/Internal storage", "my.thumbnails.backup"));
         Assert.False(Skip("/Internal storage", ".thumbnails2"));
-        // Trailing whitespace stops the exact-name match - recorded, not endorsed.
+        // Trailing whitespace stops the exact-name match, and that is the
+        // intended behaviour, not an oversight: the rule fails OPEN so that a
+        // real album named ".thumbnails " is never skipped. See the note on
+        // FolderPolicy.ShouldSkip. Over-scanning costs time, under-scanning
+        // costs photos.
         Assert.False(Skip("/Internal storage", ".thumbnails "));
         Assert.False(Skip("/Internal storage/Android", "data "));
     }
