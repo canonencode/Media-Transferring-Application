@@ -24,8 +24,31 @@ public sealed class SessionHealthMonitor
     const int BatchSize = 20;
     const double ErrorThreshold = 0.75;
 
+    /// <summary>
+    /// How much time the breaker will let checks burn without finding anything
+    /// before it stops making them.
+    ///
+    /// Budgeting WASTED time rather than total time is the whole point. A
+    /// content read costs about 13 ms on one measured phone and 278 ms on
+    /// another - a twentyfold spread - so a flat time cap would cut off the
+    /// slow device, which is exactly the one where extension matching is most
+    /// likely to be failing too. On an e-reader we measured, 710 of 772 files
+    /// needed a content read and every one of the 620 media files was found
+    /// that way; a total-time cap would have stopped that scan partway and
+    /// reported the device as nearly empty.
+    ///
+    /// So a check that identifies something clears the meter: the path is
+    /// paying for itself and may keep going for as long as it keeps doing so.
+    /// Only a run of reads that find nothing runs the budget down.
+    /// </summary>
+    public static readonly TimeSpan WastedTimeBudget = TimeSpan.FromSeconds(30);
+
     int _checksInBatch;
     int _errorsInBatch;
+    TimeSpan _wasted;
+
+    /// <summary>Time spent on checks since the last one that identified a file.</summary>
+    public TimeSpan WastedTime => _wasted;
 
     /// <summary>True once the session looks broken and checks have been abandoned.</summary>
     public bool CheckingDisabled { get; private set; }
@@ -40,10 +63,17 @@ public sealed class SessionHealthMonitor
     public void RecordSkippedCheck() => SkippedBecauseDisabled++;
 
     /// <summary>
-    /// Records one completed check. Returns the error rate that tripped the
-    /// breaker, or null if it did not trip on this call.
+    /// Records one completed check. Returns why the breaker tripped, or null if
+    /// it did not trip on this call.
     /// </summary>
-    public double? RecordResult(bool errored)
+    /// <param name="errored">The read failed, as opposed to finding no match.</param>
+    /// <param name="cost">How long the read took.</param>
+    /// <param name="identifiedFile">
+    /// The check worked out what the file was - media or a document. This is
+    /// what "the read earned its cost" means; finding nothing is a legitimate
+    /// answer but not a productive one.
+    /// </param>
+    public BreakerTrip? RecordResult(bool errored, TimeSpan cost, bool identifiedFile)
     {
         // Once tripped, stay quiet. Reporting again would reprint the whole
         // multi-line warning; today that is masked only because the caller
@@ -51,23 +81,66 @@ public sealed class SessionHealthMonitor
         // coupling that breaks the moment someone adds a second caller.
         if (CheckingDisabled) return null;
 
+        // A failed read costs time too, but its time is not what is wrong with
+        // it - the failure is, and that is the error rule's business. Letting
+        // failures fill the time budget would trip the wrong breaker on a
+        // device that is both slow and broken, and tell the user the reads are
+        // "not finding anything" when in fact they are not working at all.
+        if (identifiedFile) _wasted = TimeSpan.Zero;
+        else if (!errored && cost > TimeSpan.Zero) _wasted += cost;
+
         _checksInBatch++;
         if (errored) _errorsInBatch++;
-        if (_checksInBatch < BatchSize) return null;
 
-        double errorRate = (double)_errorsInBatch / _checksInBatch;
-        _checksInBatch = 0;
-        _errorsInBatch = 0;
+        // The error rate is checked first because it is the more useful
+        // diagnosis when both apply: it means the session is broken and tells
+        // the user to replug the device, where the time budget only means the
+        // reads are not paying off.
+        if (_checksInBatch >= BatchSize)
+        {
+            double errorRate = (double)_errorsInBatch / _checksInBatch;
+            _checksInBatch = 0;
+            _errorsInBatch = 0;
 
-        if (errorRate < ErrorThreshold) return null;
+            if (errorRate >= ErrorThreshold)
+            {
+                // NOT attempted here: reconnecting mid-scan. It was implemented
+                // and tested, and it corrupted the walk - a run that should
+                // have seen ~19,000 files saw ~17,500 - because PrintTree's
+                // recursion holds enumerators from the old session on outer
+                // stack frames, and swapping the session out from under them
+                // breaks the rest of the tree. A live reconnect is only safe
+                // between whole scans, never inside one.
+                CheckingDisabled = true;
+                return new BreakerTrip(BreakerCause.Errors, errorRate, _wasted);
+            }
+        }
 
-        // NOT attempted here: reconnecting mid-scan. It was implemented and
-        // tested, and it corrupted the walk - a run that should have seen
-        // ~19,000 files saw ~17,500 - because PrintTree's recursion holds
-        // enumerators from the old session on outer stack frames, and swapping
-        // the session out from under them breaks the rest of the tree. A live
-        // reconnect is only safe between whole scans, never inside one.
+        if (_wasted < WastedTimeBudget) return null;
+
         CheckingDisabled = true;
-        return errorRate;
+        return new BreakerTrip(BreakerCause.WastedTime, 0, _wasted);
     }
 }
+
+/// <summary>Why <see cref="SessionHealthMonitor"/> stopped reading file contents.</summary>
+public enum BreakerCause
+{
+    /// <summary>
+    /// The reads are failing rather than finding nothing. The session's stream
+    /// channel is broken while property queries keep working, which is a state
+    /// only replugging the device or restarting WPDBusEnum clears.
+    /// </summary>
+    Errors,
+
+    /// <summary>
+    /// The reads work and keep finding nothing, having cost more time than they
+    /// are worth. Says nothing bad about the device - only that on this one,
+    /// content detection is not earning its keep.
+    /// </summary>
+    WastedTime
+}
+
+/// <param name="ErrorRate">The rate that tripped it, or 0 when time did.</param>
+/// <param name="Wasted">Time spent on checks since the last one that identified a file.</param>
+public sealed record BreakerTrip(BreakerCause Cause, double ErrorRate, TimeSpan Wasted);

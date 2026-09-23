@@ -1099,22 +1099,41 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
     signatureChecksActuallyRun++;
 
     int errorsBefore = signatureCheckErrors;
+
+    // Timed because the breaker budgets time as well as errors, and the cost of
+    // one read is a property of the device, not something that can be assumed:
+    // measured at ~13 ms on one phone and 278 ms on another.
+    var readClock = System.Diagnostics.Stopwatch.StartNew();
     FileKind kind = DetectKindBySignature(objectId);
+    readClock.Stop();
 
-    if (kind is FileKind.MediaFile or FileKind.Document) caughtBySignatureOnly++;
+    bool identified = kind is FileKind.MediaFile or FileKind.Document;
+    if (identified) caughtBySignatureOnly++;
 
-    double? trippedAt = health.RecordResult(errored: signatureCheckErrors > errorsBefore);
-    if (trippedAt is double rate)
+    var trip = health.RecordResult(
+        errored: signatureCheckErrors > errorsBefore,
+        cost: readClock.Elapsed,
+        identifiedFile: identified);
+
+    if (trip is not null)
     {
         // GAP: the scan row records THAT the breaker tripped
-        // (signature_checking_disabled) but not when, and not at what rate.
-        // Both say how much of the scan happened with the fallback switched
-        // off, which is exactly how trustworthy the result is.
-        Console.WriteLine($"\n[WARNING] Signature checks are failing at {rate:P0} - the device session's " +
-            "stream-reading capability looks broken, not just 'these files aren't media'. Disabling the " +
-            "signature fallback for the rest of THIS scan (extension-based detection is unaffected and " +
-            "continues normally). For full accuracy including unrecognized-extension files, unplug/replug " +
-            "the phone (or restart the 'Portable Device Enumerator Service' / WPDBusEnum) and run again.\n");
+        // (signature_checking_disabled) but not when, at what rate, or for
+        // which of the two reasons. All three say how much of the scan happened
+        // with the fallback switched off, which is exactly how trustworthy the
+        // result is.
+        Console.WriteLine(trip.Cause == BreakerCause.Errors
+            ? $"\n[WARNING] Signature checks are failing at {trip.ErrorRate:P0} - the device session's " +
+              "stream-reading capability looks broken, not just 'these files aren't media'. Disabling the " +
+              "signature fallback for the rest of THIS scan (extension-based detection is unaffected and " +
+              "continues normally). For full accuracy including unrecognized-extension files, unplug/replug " +
+              "the phone (or restart the 'Portable Device Enumerator Service' / WPDBusEnum) and run again.\n"
+            : $"\n[WARNING] Reading file contents has cost {trip.Wasted.TotalSeconds:F0} seconds without " +
+              "identifying anything, so it is being stopped for the rest of THIS scan. The reads are " +
+              "working - they are simply not finding media on this device, and on slow hardware they can " +
+              "cost hundreds of milliseconds each. Extension-based detection is unaffected and continues " +
+              "normally; files with an unrecognized extension are now reported as [UNCHECKED] rather than " +
+              "guessed at.\n");
     }
 
     return kind;

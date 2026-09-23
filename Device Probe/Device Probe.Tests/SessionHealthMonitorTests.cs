@@ -14,15 +14,23 @@
 /// </summary>
 public class SessionHealthMonitorTests
 {
+    /// <summary>
+    /// One check, costing nothing and finding nothing. These tests are about
+    /// the error-rate rule, so they hold the time budget out of the way by
+    /// reporting a zero cost - the budget's own tests supply real durations.
+    /// </summary>
+    static BreakerTrip? Record(SessionHealthMonitor monitor, bool errored) =>
+        monitor.RecordResult(errored, TimeSpan.Zero, identifiedFile: false);
+
     const int BatchSize = 20;
 
     /// <summary>Feeds n results and returns the rate from the call that tripped, if any.</summary>
-    static double? Feed(SessionHealthMonitor monitor, int count, bool errored)
+    static BreakerTrip? Feed(SessionHealthMonitor monitor, int count, bool errored)
     {
-        double? tripped = null;
+        BreakerTrip? tripped = null;
         for (int i = 0; i < count; i++)
         {
-            double? result = monitor.RecordResult(errored);
+            BreakerTrip? result = Record(monitor, errored);
             if (result is not null) tripped = result;
         }
         return tripped;
@@ -49,7 +57,7 @@ public class SessionHealthMonitorTests
         // not a batch until it is full.
         for (int i = 0; i < BatchSize - 1; i++)
         {
-            Assert.Null(monitor.RecordResult(errored: true));
+            Assert.Null(Record(monitor, true));
             Assert.False(monitor.CheckingDisabled);
         }
     }
@@ -66,10 +74,10 @@ public class SessionHealthMonitorTests
     {
         var monitor = new SessionHealthMonitor();
 
-        double? tripped = null;
+        BreakerTrip? tripped = null;
         for (int i = 0; i < BatchSize; i++)
         {
-            double? result = monitor.RecordResult(errored: i < errorsInBatch);
+            BreakerTrip? result = Record(monitor, i < errorsInBatch);
             if (result is not null) tripped = result;
         }
 
@@ -103,10 +111,10 @@ public class SessionHealthMonitorTests
         Assert.Null(Feed(monitor, 4, errored: false));   // 19 calls so far
         Assert.False(monitor.CheckingDisabled);
 
-        double? rate = monitor.RecordResult(errored: false); // the 20th
+        BreakerTrip? rate = Record(monitor, false); // the 20th
 
         Assert.NotNull(rate);
-        Assert.Equal(0.75, rate!.Value, precision: 10);
+        Assert.Equal(0.75, rate!.ErrorRate, precision: 10);
         Assert.True(monitor.CheckingDisabled);
     }
 
@@ -119,15 +127,15 @@ public class SessionHealthMonitorTests
     {
         var monitor = new SessionHealthMonitor();
 
-        double? tripped = null;
+        BreakerTrip? tripped = null;
         for (int i = 0; i < BatchSize; i++)
         {
-            double? result = monitor.RecordResult(errored: i < errorsInBatch);
+            BreakerTrip? result = Record(monitor, i < errorsInBatch);
             if (result is not null) tripped = result;
         }
 
         Assert.NotNull(tripped);
-        Assert.Equal(expectedRate, tripped!.Value, precision: 10);
+        Assert.Equal(expectedRate, tripped!.ErrorRate, precision: 10);
         Assert.True(monitor.CheckingDisabled);
     }
 
@@ -138,10 +146,10 @@ public class SessionHealthMonitorTests
 
         for (int i = 0; i < BatchSize - 1; i++)
         {
-            Assert.Null(monitor.RecordResult(errored: true));
+            Assert.Null(Record(monitor, true));
         }
 
-        Assert.NotNull(monitor.RecordResult(errored: true));
+        Assert.NotNull(Record(monitor, true));
     }
 
     // ---- The batch really is rolling ---------------------------------------
@@ -162,10 +170,10 @@ public class SessionHealthMonitorTests
         Assert.Null(Feed(monitor, 4, errored: false));           // calls 36-39
         Assert.False(monitor.CheckingDisabled);
 
-        double? rate = monitor.RecordResult(errored: false);     // call 40
+        BreakerTrip? rate = Record(monitor, false);     // call 40
 
         Assert.NotNull(rate);
-        Assert.Equal(0.75, rate!.Value, precision: 10);
+        Assert.Equal(0.75, rate!.ErrorRate, precision: 10);
     }
 
     [Fact]
@@ -207,7 +215,7 @@ public class SessionHealthMonitorTests
         var monitor = new SessionHealthMonitor();
         Feed(monitor, BatchSize, errored: true);
 
-        double? afterRecovery = Feed(monitor, BatchSize, errored: false);
+        BreakerTrip? afterRecovery = Feed(monitor, BatchSize, errored: false);
 
         Assert.Null(afterRecovery);
         Assert.True(monitor.CheckingDisabled);
@@ -258,7 +266,7 @@ public class SessionHealthMonitorTests
         Assert.False(monitor.CheckingDisabled);   // skips did not complete the batch
         Assert.Equal(100, monitor.SkippedBecauseDisabled);
 
-        Assert.NotNull(monitor.RecordResult(errored: true));  // the 20th real result
+        Assert.NotNull(Record(monitor, true));  // the 20th real result
         Assert.True(monitor.CheckingDisabled);
         Assert.Equal(100, monitor.SkippedBecauseDisabled);    // unchanged by the trip
     }
@@ -279,7 +287,7 @@ public class SessionHealthMonitorTests
         Assert.Null(Feed(monitor, BatchSize - 1, errored: true));
         Assert.False(monitor.CheckingDisabled);
 
-        Assert.NotNull(monitor.RecordResult(errored: true));
+        Assert.NotNull(Record(monitor, true));
         Assert.True(monitor.CheckingDisabled);
         Assert.Equal(50, monitor.SkippedBecauseDisabled);
     }
@@ -313,14 +321,150 @@ public class SessionHealthMonitorTests
         // classified as "not media".
         var monitor = new SessionHealthMonitor();
 
-        double? rate = Feed(monitor, BatchSize, errored: true);
+        BreakerTrip? rate = Feed(monitor, BatchSize, errored: true);
         Assert.NotNull(rate);
-        Assert.Equal(1.0, rate!.Value, precision: 10);
+        Assert.Equal(1.0, rate!.ErrorRate, precision: 10);
 
         int remaining = 1607 - BatchSize;
         for (int i = 0; i < remaining; i++) monitor.RecordSkippedCheck();
 
         Assert.True(monitor.CheckingDisabled);
         Assert.Equal(remaining, monitor.SkippedBecauseDisabled);
+    }
+
+    // ---- The time budget ----------------------------------------------------
+    //
+    // The second reason to stop reading contents. Measured cost per read varies
+    // twentyfold across devices - 13 ms on one phone, 278 ms on another - so
+    // the same handful of checks is free on one and minutes of work on the
+    // next. What is budgeted is time spent finding NOTHING, because a read that
+    // identifies a file has earned its keep no matter what it cost.
+
+    static BreakerTrip? Cost(SessionHealthMonitor monitor, double seconds, bool identified = false) =>
+        monitor.RecordResult(errored: false, cost: TimeSpan.FromSeconds(seconds), identifiedFile: identified);
+
+    [Fact]
+    public void FruitlessReading_StopsOnceItHasCostMoreThanTheBudget()
+    {
+        var monitor = new SessionHealthMonitor();
+
+        BreakerTrip? trip = null;
+        for (int i = 0; i < 29; i++) trip = Cost(monitor, 1) ?? trip;
+        Assert.Null(trip);
+        Assert.False(monitor.CheckingDisabled);
+
+        trip = Cost(monitor, 1);
+
+        Assert.NotNull(trip);
+        Assert.Equal(BreakerCause.WastedTime, trip!.Cause);
+        Assert.True(monitor.CheckingDisabled);
+        Assert.True(trip.Wasted >= SessionHealthMonitor.WastedTimeBudget);
+    }
+
+    [Fact]
+    public void AReadThatIdentifiesAFile_PaysForTheOnesThatFoundNothing()
+    {
+        // The rule that keeps the budget from punishing the device it is most
+        // needed on: on an e-reader we measured, content reading was the ONLY
+        // thing that worked, and a total-time cap would have cut that scan off.
+        var monitor = new SessionHealthMonitor();
+        for (int i = 0; i < 29; i++) Cost(monitor, 1);
+
+        Assert.Null(Cost(monitor, 1, identified: true));
+
+        Assert.Equal(TimeSpan.Zero, monitor.WastedTime);
+        Assert.False(monitor.CheckingDisabled);
+    }
+
+    [Fact]
+    public void ADeviceWhereContentReadingIsTheOnlyThingThatWorks_IsNeverCutOff()
+    {
+        // Shaped after the e-reader: 710 reads, most of them productive, each
+        // one slow. Hours of total time, and every second of it earned.
+        var monitor = new SessionHealthMonitor();
+
+        for (int i = 0; i < 710; i++)
+        {
+            Assert.Null(Cost(monitor, 0.278, identified: i % 10 != 0));
+        }
+
+        Assert.False(monitor.CheckingDisabled);
+    }
+
+    [Fact]
+    public void ThePhoneThisWasBuiltAgainst_NeverReachesTheBudget()
+    {
+        // Measured: 5 reads per scan, ~13 ms each, none of them productive.
+        // 65 ms against a 30-second budget - the breaker must be invisible here.
+        var monitor = new SessionHealthMonitor();
+
+        for (int i = 0; i < 5; i++) Assert.Null(Cost(monitor, 0.013));
+
+        Assert.False(monitor.CheckingDisabled);
+        Assert.True(monitor.WastedTime < TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
+    public void ASlowDeviceFindingNothing_IsStoppedInAboutAHundredReads()
+    {
+        // 278 ms a read and nothing to show for it: without a time rule this
+        // runs for as long as there are unrecognised extensions - 13,791 of
+        // them would be well over an hour.
+        var monitor = new SessionHealthMonitor();
+
+        int reads = 0;
+        BreakerTrip? trip = null;
+        while (trip is null && reads < 1000) { trip = Cost(monitor, 0.278); reads++; }
+
+        Assert.NotNull(trip);
+        Assert.Equal(BreakerCause.WastedTime, trip!.Cause);
+        Assert.InRange(reads, 100, 120);
+    }
+
+    [Fact]
+    public void WhenReadsAreBothSlowAndFAILING_TheErrorRuleIsTheOneThatReports()
+    {
+        // Both conditions are true, and the diagnosis matters: "the session's
+        // stream channel is broken, replug the device" is actionable, while
+        // "these reads are not finding anything" would send the user looking
+        // for a problem with their files. Failed reads are kept out of the time
+        // budget entirely so this cannot come out the wrong way round.
+        var monitor = new SessionHealthMonitor();
+
+        BreakerTrip? trip = null;
+        for (int i = 0; i < BatchSize; i++)
+        {
+            trip = monitor.RecordResult(errored: true, cost: TimeSpan.FromSeconds(5), identifiedFile: false) ?? trip;
+        }
+
+        Assert.NotNull(trip);
+        Assert.Equal(BreakerCause.Errors, trip!.Cause);
+        Assert.Equal(1.0, trip.ErrorRate, precision: 10);
+        Assert.Equal(TimeSpan.Zero, monitor.WastedTime);
+    }
+
+    [Fact]
+    public void OnceStoppedByTime_ItDoesNotReportAgain()
+    {
+        var monitor = new SessionHealthMonitor();
+        BreakerTrip? trip = null;
+        for (int i = 0; i < 40 && trip is null; i++) trip = Cost(monitor, 1);
+        Assert.NotNull(trip);
+
+        Assert.Null(Cost(monitor, 1));
+        Assert.Null(Cost(monitor, 1, identified: true));
+    }
+
+    [Fact]
+    public void AZeroCostRead_NeverMovesTheMeter()
+    {
+        // The error-rate tests feed zero-cost reads so the two rules stay
+        // independent; this is what lets them do that.
+        var monitor = new SessionHealthMonitor();
+
+        for (int i = 0; i < 500; i++) Cost(monitor, 0);
+
+        Assert.Equal(TimeSpan.Zero, monitor.WastedTime);
+        Assert.False(monitor.CheckingDisabled);
     }
 }
