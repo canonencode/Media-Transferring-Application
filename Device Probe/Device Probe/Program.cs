@@ -214,6 +214,13 @@ int sessionClosed = 0;
 //   1. Are stored object ids still valid in a later session? WPD documents
 //      them as NOT stable across sessions, and a copier that trusts them would
 //      work on one device and quietly fail on another.
+//
+//      What this actually answers, and the distinction cost a real transfer:
+//      it tests a NEW PROCESS against a phone that has stayed plugged in, and
+//      there the ids hold. They do NOT survive the cable coming out - a copy
+//      run straight after a replug failed on every file with 0x80042009,
+//      "invalid object handle". So a scan describes a connection, not a phone,
+//      and the copier now says so when it sees three of those in a row.
 //   2. What does opening a stream cost per file? Measured at ~13 ms on this
 //      phone and 278 ms on another, and 13,630 of them is either three minutes
 //      or an hour.
@@ -1451,6 +1458,16 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
     // needs a success to advance), and looks exactly like a freeze.
     int failuresInARow = 0;
     string? breakerReason = null;
+
+    // Counts the one failure that has a specific cure. WPD object handles are
+    // the scan's way of asking for a file's bytes, and unplugging the phone ends
+    // the session that issued them - measured here, not assumed: a transfer run
+    // straight after a replug failed on every file with this code. An earlier
+    // measurement in this project reported the handles as surviving "a later
+    // session", but what it actually tested was a new PROCESS against a phone
+    // that had stayed plugged in. That is a narrower claim than the one drawn
+    // from it.
+    int staleHandles = 0;
     long lastProgress = DateTime.UtcNow.Ticks;
     int copyAborted = 0;
     // Raised when the copy loop is provably out of the device's hands, so the
@@ -1672,6 +1689,22 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
             // reports success while leaving things behind.
             failed++;
             failuresInARow++;
+
+            // 0x80042009 is WPD's "invalid object handle": the id does not refer
+            // to any object on the device. Three in a row is not three deleted
+            // photographs, it is a scan that no longer describes this session -
+            // and the answer is a rescan, not a retry. Saying so after three
+            // rather than after twenty saves the user nineteen pointless waits
+            // and a reason that explains nothing.
+            if (ex is System.Runtime.InteropServices.COMException com
+                && unchecked((uint)com.HResult) == 0x80042009)
+            {
+                staleHandles++;
+            }
+            else
+            {
+                staleHandles = 0;
+            }
             try
             {
                 ledger.Fail(copyId, $"{ex.GetType().Name}: {ex.Message}");
@@ -1686,6 +1719,14 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
             }
             try { if (File.Exists(part)) File.Delete(part); } catch (IOException) { }
             if (failed <= 10) Console.WriteLine($"  [FAIL] {item.Name}: {ex.Message}");
+
+            if (breakerReason is null && staleHandles >= 3)
+            {
+                breakerReason = "Bu tarama artık bu bağlantıyı tanımıyor. Telefon çıkarılıp " +
+                    "takıldığında dosya kimlikleri geçersiz oluyor; ÖNCE YENİDEN TARAYIN, sonra " +
+                    "aktarımı tekrar başlatın. Kopyalanmış dosyalar korunur.";
+                Volatile.Write(ref copyAborted, 1);
+            }
 
             if (breakerReason is null && failuresInARow >= 20)
             {
