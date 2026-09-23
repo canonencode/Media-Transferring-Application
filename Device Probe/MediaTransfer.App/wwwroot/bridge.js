@@ -588,6 +588,18 @@
   function endCopy(m) {
     if (!copyLed || !copyLed.isConnected) return;
 
+    // Host defteri okuyamamis. Sayi uydurmak yerine okunamadigini soyluyor:
+    // dosyalar kopyalanmis olabilir ve "0 dosya, hepsi yerinde" yazmak,
+    // bilmemekten daha kotu bir cevap.
+    if (m.unknown) {
+      copyTitle.textContent = "Aktarım bitti";
+      copyNow.textContent = "Sonuç okunamadı";
+      copyLed.innerHTML = "";
+      copyRow(copyLed, "Kaç dosya aktarıldığı okunamadı", "", "total bad");
+      setStrip("", "Aktarım bitti, özeti okunamadı.", m.message);
+      return;
+    }
+
     copyTitle.textContent = m.crashed ? "Yarıda kaldı" : "Aktarım bitti";
     copyNow.textContent = m.crashed ? "Yarıda kaldı" : "Bitti";
     copyLed.innerHTML = "";

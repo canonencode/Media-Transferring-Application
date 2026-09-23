@@ -473,28 +473,56 @@ public sealed class MainWindow : Form
         long baseline = _copyBaseline ?? 0;
         _copyBaseline = null;
 
-        var p = _store.CopyProgressSince(baseline);
-        var failures = p.Failed > 0 ? _store.CopyFailuresSince(baseline, 50) : [];
-        int notReached = Math.Max(0, _copyPlanned - p.Done - p.Failed);
-
-        Diagnostics.Write($"aktarim bitti: {p.Done} kopyalandi, {p.Failed} basarisiz, " +
-            $"{notReached} ulasilmadi, kod {exit.ExitCode}");
-
-        Send(new
+        try
         {
-            type = "transferEnded",
-            done = p.Done,
-            failed = p.Failed,
-            notReached,
-            bytes = p.Bytes,
-            planned = _copyPlanned,
-            crashed = exit.Crashed,
-            failures,
-            message = exit.Crashed
-                ? "Aktarım beklenmedik şekilde durdu. Kopyalanan dosyalar yerinde; kabloyu çıkarıp " +
-                  "takın ve tekrar başlatın, biten dosyalar ikinci kez kopyalanmaz."
-                : "",
-        });
+            var p = _store.CopyProgressSince(baseline);
+            var failures = p.Failed > 0 ? _store.CopyFailuresSince(baseline, 50) : [];
+            int notReached = Math.Max(0, _copyPlanned - p.Done - p.Failed);
+
+            Diagnostics.Write($"aktarim bitti: {p.Done} kopyalandi, {p.Failed} basarisiz, " +
+                $"{notReached} ulasilmadi, kod {exit.ExitCode}");
+
+            Send(new
+            {
+                type = "transferEnded",
+                done = p.Done,
+                failed = p.Failed,
+                notReached,
+                bytes = p.Bytes,
+                planned = _copyPlanned,
+                crashed = exit.Crashed,
+                failures,
+                message = exit.Crashed
+                    ? "Aktarım beklenmedik şekilde durdu. Kopyalanan dosyalar yerinde; kabloyu çıkarıp " +
+                      "takın ve tekrar başlatın, biten dosyalar ikinci kez kopyalanmaz."
+                    : "",
+            });
+        }
+        catch (Exception ex)
+        {
+            // This is the "say what happened" path, so it is the last one
+            // allowed to be the thing that goes wrong. An exception escaping
+            // here reaches BeginInvoke with nothing to catch it and closes the
+            // window - leaving a finished transfer looking like a crash, which
+            // is the exact confusion the ledger exists to prevent. The files are
+            // copied and the rows are on disk either way; only the summary is
+            // lost, so that is all this admits to.
+            Diagnostics.Write("aktarim ozeti okunamadi: " + ex);
+            // "unknown" rather than zeros. Sending done = 0 would have the page
+            // draw "0 files copied, all present" over a transfer that may have
+            // moved thousands - a confident wrong answer, which is worse than
+            // admitting the summary could not be read.
+            Send(new
+            {
+                type = "transferEnded",
+                unknown = true,
+                crashed = exit.Crashed,
+                planned = _copyPlanned,
+                failures = Array.Empty<object>(),
+                message = "Aktarım bitti ama özeti okunamadı: " + ex.Message +
+                    " Kopyalanan dosyalar yerinde; listeyi yenilemek doğru sayıyı gösterir.",
+            });
+        }
     }
 
     void Send(object message) => SendRaw(JsonSerializer.Serialize(message));
