@@ -19,7 +19,7 @@ namespace MediaTransfer.Core;
 public static class ScanSchema
 {
     /// <summary>What this build knows how to read and write.</summary>
-    public const int Version = 3;
+    public const int Version = 4;
 
     const string Tables = """
         CREATE TABLE IF NOT EXISTS device (
@@ -47,6 +47,7 @@ public static class ScanSchema
             signature_checks_run INTEGER, caught_by_signature_only INTEGER,
             signature_check_errors INTEGER, files_skipped_by_breaker INTEGER,
             signature_checking_disabled INTEGER, file_property_misses INTEGER,
+            audio_files INTEGER,
             unresolved_objects INTEGER,
             retry_ran INTEGER, retry_skip_reason TEXT, retry_attempted INTEGER,
             recovered_files INTEGER, recovered_folders INTEGER,
@@ -160,6 +161,11 @@ public static class ScanSchema
         // 2 -> 3: the copy ledger. A whole table, unlike a column, can simply
         // be created - IF NOT EXISTS does the right thing for one.
         if (version < 3) Run(connection, Tables);
+
+        // 3 -> 4: audio became a kind of its own, so a scan can say how many
+        // recordings it found instead of burying them in the count of files it
+        // decided were not worth taking.
+        if (version < 4) AddColumn(connection, "scan", "audio_files", "INTEGER");
 
         Run(connection, $"PRAGMA user_version = {Version};");
     }

@@ -435,7 +435,8 @@ if (args.Length > 1 && args[0] == "--copy")
     RunCopy(
         args[1],
         args.Length > 2 && long.TryParse(args[2], out long wantedScan) ? wantedScan : 0,
-        args.Length > 3 ? args[3] : "all");
+        args.Length > 3 ? args[3] : "all",
+        args.Length > 4 && args[4] is "all" or "hepsi");
     CloseSession();
     return;
 }
@@ -1169,7 +1170,7 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
     FileKind kind = DetectKindBySignature(objectId);
     readClock.Stop();
 
-    bool identified = kind is FileKind.MediaFile or FileKind.Document;
+    bool identified = kind is FileKind.MediaFile or FileKind.AudioFile or FileKind.Document;
     if (identified) caughtBySignatureOnly++;
 
     var trip = health.RecordResult(
@@ -1220,7 +1221,19 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
 /// vendor's folder naming can change underneath it, and a command line argument
 /// that shifts with the device is one nothing can be scripted against.
 /// </param>
-void RunCopy(string destinationRoot, long requestedScanId, string sources)
+/// <param name="everyKind">
+/// Take everything the walk saw, not just what it called media or a document.
+///
+/// The default is the narrower set because a transfer is usually about
+/// photographs. But "media" here means pictures and video: audio was
+/// deliberately excluded so that an .m4a would not be mistaken for a video by
+/// its container bytes, and the effect is that voice recordings, WhatsApp voice
+/// notes, the contacts .vcf and WhatsApp's own encrypted message database all
+/// land in "Unknown" and are left on the phone. On a phone that is about to be
+/// given away, that is the wrong default to be stuck with - measured on the test
+/// device, it was 162 files including 62 voice notes and the chat history.
+/// </param>
+void RunCopy(string destinationRoot, long requestedScanId, string sources, bool everyKind)
 {
     destinationRoot = Path.GetFullPath(destinationRoot);
 
@@ -1229,6 +1242,7 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
     long scanId = requestedScanId;
     string? scanDeviceKey = null;
     var items = new List<TransferItem>();
+    var leftBehind = new List<(string Kind, int Count, long Bytes)>();
 
     using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
         $"Data Source={SqliteScanSink.DefaultDatabasePath};Mode=ReadOnly;Pooling=False"))
@@ -1260,16 +1274,48 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
         using var q = db.CreateCommand();
         // The same two kinds the setup page counted. App data stays where it is:
         // it belongs to the app that wrote it and means nothing on a PC.
-        q.CommandText = """
-            SELECT object_id, path, name, size, modified_raw
-            FROM file WHERE scan_id = $s AND kind IN ('MediaFile', 'Document');
-            """;
+        q.CommandText = everyKind
+            ? """
+              SELECT object_id, path, name, size, modified_raw FROM file WHERE scan_id = $s;
+              """
+            : """
+              SELECT object_id, path, name, size, modified_raw
+              FROM file WHERE scan_id = $s AND kind IN ('MediaFile', 'AudioFile', 'Document');
+              """;
         q.Parameters.AddWithValue("$s", scanId);
-        using var r = q.ExecuteReader();
-        while (r.Read())
+        using (var r = q.ExecuteReader())
         {
-            items.Add(new TransferItem(r.GetString(0), r.GetString(1), r.GetString(2),
-                r.IsDBNull(3) ? 0 : r.GetInt64(3), r.IsDBNull(4) ? null : r.GetString(4)));
+            while (r.Read())
+            {
+                items.Add(new TransferItem(r.GetString(0), r.GetString(1), r.GetString(2),
+                    r.IsDBNull(3) ? 0 : r.GetInt64(3), r.IsDBNull(4) ? null : r.GetString(4)));
+            }
+        }
+
+        // What the scan saw and this transfer will NOT carry.
+        //
+        // Read on purpose, and reported at the end even when the run is a clean
+        // success, because the alternative has already happened: a transfer said
+        // "13,630 files, complete, every byte verified" and was telling the
+        // truth about everything it had SELECTED. 162 files sat outside that
+        // selection - 107 recordings among them - and no screen in this program
+        // mentioned their existence. The phone was wiped three hours later.
+        //
+        // A total is only honest next to what it excludes.
+        if (!everyKind)
+        {
+            using var rest = db.CreateCommand();
+            rest.CommandText = """
+                SELECT kind, COUNT(*), COALESCE(SUM(size), 0) FROM file
+                WHERE scan_id = $s AND kind NOT IN ('MediaFile', 'AudioFile', 'Document')
+                GROUP BY kind ORDER BY COUNT(*) DESC;
+                """;
+            rest.Parameters.AddWithValue("$s", scanId);
+            using var rr = rest.ExecuteReader();
+            while (rr.Read())
+            {
+                leftBehind.Add((rr.GetString(0), rr.GetInt32(1), rr.GetInt64(2)));
+            }
         }
     }
 
@@ -1418,9 +1464,11 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
     }
 
     Console.WriteLine($"Scan {scanId} -> {destinationRoot}");
+    if (everyKind) Console.WriteLine("Every kind, including audio, archives and app data.");
     if (sources is not ("all" or "")) Console.WriteLine($"Only: {sources}");
     Console.WriteLine($"{work.Count} file(s) to copy, {plannedBytes / 1024 / 1024} MB. " +
         $"{alreadyThere} already there.");
+    ReportLeftBehind();
 
     if (work.Count == 0)
     {
@@ -1772,9 +1820,35 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
     Console.WriteLine($"  ledger        : {counts.Done} done, {counts.Failed} failed, " +
         $"{counts.Unfinished} unfinished for this device");
 
+    ReportLeftBehind();
+
     if (stopped || failed > 0 || notReached > 0)
     {
         Console.WriteLine("\nRun again to carry on. Files that finished are not copied twice.");
+    }
+
+    // Printed twice on purpose: before the transfer, where it can still change
+    // the user's mind, and after it, next to the total - which is the place a
+    // number gets believed.
+    void ReportLeftBehind()
+    {
+        int count = leftBehind.Sum(x => x.Count);
+        if (count == 0) return;
+
+        long bytes = leftBehind.Sum(x => x.Bytes);
+        Console.WriteLine($"NOT taken: {count} file(s), {bytes / 1024 / 1024} MB - the scan saw them " +
+            "and this transfer does not carry them.");
+        foreach (var (kind, n, b) in leftBehind)
+        {
+            string meaning = kind switch
+            {
+                "Unknown" => "app data, archives, databases - examined and not identified as media",
+                "Undetermined" => "COULD NOT BE CHECKED - any of these may be a photograph",
+                _ => kind,
+            };
+            Console.WriteLine($"    {n,6}  {b / 1024 / 1024,6} MB  {meaning}");
+        }
+        Console.WriteLine("    Add \"all\" as the last argument to take these too.");
     }
 }
 

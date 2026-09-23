@@ -30,7 +30,7 @@ public class ConsoleScanSinkTests
 
     static ScanOutcome CleanOutcome() =>
         new(Completed: true, Stalled: false, Faulted: false, CameraMode: false,
-            MediaFiles: 0, Documents: 0, UndeterminedFiles: 0, TotalFilesSeen: 0,
+            MediaFiles: 0, Documents: 0, AudioFiles: 0, UndeterminedFiles: 0, TotalFilesSeen: 0,
             SubtreeLosses: 0, UnresolvedObjects: 0, SignatureChecksRun: 0, CaughtBySignatureOnly: 0,
             SignatureCheckErrors: 0, FilesSkippedByBreaker: 0,
             SignatureCheckingDisabled: false, FilePropertyMisses: 0);
@@ -561,7 +561,7 @@ public class ConsoleScanSinkTests
             "    [RECOVERED-DOC] cv.pdf" + nl +
             "\nScan is PARTIAL - this is not a full picture of the device:" + nl +
             "  - 1 file(s) were never examined (listed above as [UNCHECKED])" + nl +
-            "\nDone. 1 media file(s) and 1 document(s) found out of 4 file(s) seen." + nl +
+            "\nDone. 1 media file(s), 0 audio file(s) and 1 document(s) found out of 4 file(s) seen." + nl +
             "(0 of those were caught only by file signature - their extension wasn't recognized.)" + nl +
             "Expensive signature check actually ran on 0 file(s) (out of 4 total)." + nl +
             "Signature check itself errored (not just 'no match') on 0 file(s)." + nl +

@@ -81,7 +81,7 @@ public class SqliteScanSinkTests
 
     static ScanOutcome CleanOutcome() =>
         new(Completed: true, Stalled: false, Faulted: false, CameraMode: false,
-            MediaFiles: 0, Documents: 0, UndeterminedFiles: 0, TotalFilesSeen: 0,
+            MediaFiles: 0, Documents: 0, AudioFiles: 0, UndeterminedFiles: 0, TotalFilesSeen: 0,
             SubtreeLosses: 0, UnresolvedObjects: 0, SignatureChecksRun: 0, CaughtBySignatureOnly: 0,
             SignatureCheckErrors: 0, FilesSkippedByBreaker: 0,
             SignatureCheckingDisabled: false, FilePropertyMisses: 0);

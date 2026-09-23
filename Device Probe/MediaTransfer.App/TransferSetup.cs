@@ -135,7 +135,7 @@ public sealed class TransferSetup(string databasePath)
         using var q = c.CreateCommand();
         q.CommandText = """
             SELECT object_id, path, name, size, modified_raw
-            FROM file WHERE scan_id = $s AND kind IN ('MediaFile', 'Document');
+            FROM file WHERE scan_id = $s AND kind IN ('MediaFile', 'AudioFile', 'Document');
             """;
         q.Parameters.AddWithValue("$s", scanId);
 

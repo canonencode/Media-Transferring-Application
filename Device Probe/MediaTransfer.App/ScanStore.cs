@@ -116,7 +116,7 @@ public sealed class ScanStore(string databasePath)
         using var q = c.CreateCommand();
         q.CommandText = """
             SELECT file_id, path, name, size, kind, modified_raw
-            FROM file WHERE scan_id = $s AND file_id > $after AND kind IN ('MediaFile', 'Document')
+            FROM file WHERE scan_id = $s AND file_id > $after AND kind IN ('MediaFile', 'AudioFile', 'Document')
             ORDER BY file_id DESC LIMIT $max;
             """;
         q.Parameters.AddWithValue("$s", scanId);
@@ -263,7 +263,7 @@ public sealed class ScanStore(string databasePath)
                 labels[id] = label;
 
                 if (!agg.TryGetValue(id, out Bucket? b)) agg[id] = b = new Bucket();
-                if (kind == "MediaFile") b.media++;
+                if (kind is "MediaFile" or "AudioFile") b.media++;
                 else if (kind == "Document") b.doc++;
                 else b.other++;
                 b.bytes += size ?? 0;
@@ -273,7 +273,7 @@ public sealed class ScanStore(string databasePath)
                 // total is what makes "13,466 of 13,791" an honest sentence,
                 // and leaving them out of the list is what makes the list
                 // readable.
-                if (kind is "MediaFile" or "Document")
+                if (kind is "MediaFile" or "AudioFile" or "Document")
                 {
                     files.Add(new
                     {

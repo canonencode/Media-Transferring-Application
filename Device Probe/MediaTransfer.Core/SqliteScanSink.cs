@@ -384,7 +384,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
                 finished_utc = $finished,
                 status = $status,
                 completed = $completed, stalled = $stalled, faulted = $faulted,
-                media_files = $media, documents = $documents,
+                media_files = $media, audio_files = $audio, documents = $documents,
                 undetermined_files = $undetermined, total_files_seen = $total,
                 subtree_losses = $losses, unresolved_objects = $unresolved,
                 signature_checks_run = $sigRun, caught_by_signature_only = $sigOnly,
@@ -407,6 +407,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         update.Parameters.AddWithValue("$stalled", outcome.Stalled ? 1 : 0);
         update.Parameters.AddWithValue("$faulted", outcome.Faulted ? 1 : 0);
         update.Parameters.AddWithValue("$media", outcome.MediaFiles);
+        update.Parameters.AddWithValue("$audio", outcome.AudioFiles);
         update.Parameters.AddWithValue("$documents", outcome.Documents);
         update.Parameters.AddWithValue("$undetermined", outcome.UndeterminedFiles);
         update.Parameters.AddWithValue("$total", outcome.TotalFilesSeen);

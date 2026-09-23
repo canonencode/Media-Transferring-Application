@@ -42,6 +42,9 @@ public sealed class ConsoleScanSink : IScanSink
             case FileKind.MediaFile:
                 Console.WriteLine($"{indent}{(recovered ? "[RECOVERED-MEDIA]" : "[MEDIA]")} {obj.Name}");
                 break;
+            case FileKind.AudioFile:
+                Console.WriteLine($"{indent}{(recovered ? "[RECOVERED-AUDIO]" : "[AUDIO]")} {obj.Name}");
+                break;
             case FileKind.Document:
                 Console.WriteLine($"{indent}{(recovered ? "[RECOVERED-DOC]" : "[DOC]")} {obj.Name}");
                 break;
@@ -138,7 +141,8 @@ public sealed class ConsoleScanSink : IScanSink
 
     static void PrintCensus(ScanOutcome outcome)
     {
-        Console.WriteLine($"\nDone. {outcome.MediaFiles} media file(s) and {outcome.Documents} document(s) found out of {outcome.TotalFilesSeen} file(s) seen.");
+        Console.WriteLine($"\nDone. {outcome.MediaFiles} media file(s), {outcome.AudioFiles} audio file(s) " +
+            $"and {outcome.Documents} document(s) found out of {outcome.TotalFilesSeen} file(s) seen.");
         Console.WriteLine($"({outcome.CaughtBySignatureOnly} of those were caught only by file signature - their extension wasn't recognized.)");
         Console.WriteLine($"Expensive signature check actually ran on {outcome.SignatureChecksRun} file(s) (out of {outcome.TotalFilesSeen} total).");
         Console.WriteLine($"Signature check itself errored (not just 'no match') on {outcome.SignatureCheckErrors} file(s).");

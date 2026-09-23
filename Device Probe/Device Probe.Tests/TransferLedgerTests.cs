@@ -280,7 +280,12 @@ public class TransferLedgerTests
         using (var sink = new SqliteScanSink(db.Path))
         {
             sink.OnScanStarted(new DeviceIdentity("wpd", "A56", Device, "samsung", "SM-A566B"), false);
-            sink.OnScanFinished(new ScanOutcome(true, false, false, false, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, false, 0));
+            sink.OnScanFinished(new ScanOutcome(Completed: true, Stalled: false, Faulted: false, CameraMode: false,
+                MediaFiles: 1, Documents: 0, AudioFiles: 0, UndeterminedFiles: 0,
+                TotalFilesSeen: 1, SubtreeLosses: 0, UnresolvedObjects: 0,
+                SignatureChecksRun: 0, CaughtBySignatureOnly: 0, SignatureCheckErrors: 0,
+                FilesSkippedByBreaker: 0, SignatureCheckingDisabled: false,
+                FilePropertyMisses: 0));
         }
 
         using (var ledger = new TransferLedger(db.Path))

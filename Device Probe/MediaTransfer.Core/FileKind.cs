@@ -22,6 +22,25 @@ public enum FileKind
     Document,
 
     /// <summary>
+    /// A recording: a voice note, a voice memo, a song, a ringtone.
+    ///
+    /// Its own kind rather than a flavour of <see cref="MediaFile"/>, because
+    /// the two are found differently. Audio is decided by extension ALONE and
+    /// never by reading bytes: audio-only MP4 variants share the "ftyp"
+    /// container with real video, and telling them apart by major brand was
+    /// tested and does not work - different encoders write different brands for
+    /// the same audio-only content. Keeping the kinds separate is what lets
+    /// audio skip the signature check without also being swept into "not media".
+    ///
+    /// That sweeping is not hypothetical. It left 107 audio files on a phone
+    /// that was then wiped - 70 of them WhatsApp voice notes, which were the one
+    /// thing the phone's owner had asked for. The transfer took 13,630 files and
+    /// verified every byte of them; it never took these, because nothing in the
+    /// record said they were worth taking.
+    /// </summary>
+    AudioFile,
+
+    /// <summary>
     /// Could NOT be checked - the content read was unavailable, either because
     /// the circuit breaker had already given up on the session or because the
     /// read itself failed.

@@ -60,15 +60,21 @@ public class FileClassifierNameTests
     public void DocumentExtension_IsDocument(string name)
         => Assert.Equal(FileKind.Document, FileClassifier.ClassifyByName(name));
 
-    // ---- Audio: must be Unknown, NOT MediaFile -----------------------------
+    // ---- Audio: its own kind, decided without reading a byte ---------------
 
     /// <summary>
     /// Audio is the trap in this whole design. MP4-family audio (.m4a, .m4b,
     /// .m4p) carries the very same "ftyp" box at offset 4 that real video
     /// carries, and .wav carries the same leading "RIFF" that .webp carries.
     /// If audio reached the signature check it would come back MediaFile, so
-    /// the only thing keeping a music library out of a photo transfer is that
-    /// these extensions are answered Unknown here, before any byte is read.
+    /// these extensions must be answered here, before any byte is read.
+    ///
+    /// The answer used to be Unknown, and that conflated two questions. "Do not
+    /// read its bytes" was right and still holds. "Not worth transferring" was
+    /// wrong, and it cost a real person real files: 107 audio recordings were
+    /// left on a phone that was then wiped, 70 of them WhatsApp voice notes -
+    /// the one thing the phone's owner had asked to keep. A voice note is as
+    /// irreplaceable as a photograph, and it is 75 KB.
     /// </summary>
     [Theory]
     [InlineData("song.m4a")]
@@ -81,13 +87,17 @@ public class FileClassifierNameTests
     [InlineData("voice.opus")]
     [InlineData("voicenote.amr")]
     [InlineData("lossless.flac")]
-    public void AudioExtension_IsUnknown_NotMedia(string name)
+    public void AudioExtension_IsAudio_NotMediaAndNotUnknown(string name)
     {
         FileKind? kind = FileClassifier.ClassifyByName(name);
 
-        Assert.Equal(FileKind.Unknown, kind);
+        Assert.Equal(FileKind.AudioFile, kind);
+        // Still not MediaFile: that is what keeps it away from the signature
+        // check, which would answer MediaFile for every one of these.
         Assert.NotEqual(FileKind.MediaFile, kind);
-        // And crucially it is an answer, not a "go look" - no device read.
+        // And no longer Unknown, which is what kept it out of transfers.
+        Assert.NotEqual(FileKind.Unknown, kind);
+        // An answer, not a "go look" - no device read.
         Assert.NotNull(kind);
     }
 
@@ -159,11 +169,11 @@ public class FileClassifierNameTests
         => Assert.Equal(FileKind.Document, FileClassifier.ClassifyByName(name));
 
     [Theory]
-    [InlineData("SONG.MP3")]
-    [InlineData("Track.M4A")]
-    [InlineData(".NOMEDIA")]
-    public void ExtensionMatching_IsCaseInsensitive_ForNonMedia(string name)
-        => Assert.Equal(FileKind.Unknown, FileClassifier.ClassifyByName(name));
+    [InlineData("SONG.MP3", FileKind.AudioFile)]
+    [InlineData("Track.M4A", FileKind.AudioFile)]
+    [InlineData(".NOMEDIA", FileKind.Unknown)]
+    public void ExtensionMatching_IsCaseInsensitive_ForNonPhotoKinds(string name, FileKind expected)
+        => Assert.Equal(expected, FileClassifier.ClassifyByName(name));
 
     // ---- Names a real phone cannot produce ---------------------------------
     // This block is the reason for extracting the class at all. Android's own
@@ -203,7 +213,7 @@ public class FileClassifierNameTests
             FileClassifier.ClassifyByName("İstanbul-görüntüsü.mp4"));
         Assert.Equal(FileKind.Document,
             FileClassifier.ClassifyByName("Başvuru-Belgesi-ĞÇ.pdf"));
-        Assert.Equal(FileKind.Unknown,
+        Assert.Equal(FileKind.AudioFile,
             FileClassifier.ClassifyByName("Şarkı.mp3"));
     }
 
@@ -225,7 +235,7 @@ public class FileClassifierNameTests
             Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyByName("SCAN.TIF"));
             Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyByName("SCAN.TIFF"));
             Assert.Equal(FileKind.Document, FileClassifier.ClassifyByName("FILE.PDF"));
-            Assert.Equal(FileKind.Unknown, FileClassifier.ClassifyByName("TRACK.MP3"));
+            Assert.Equal(FileKind.AudioFile, FileClassifier.ClassifyByName("TRACK.MP3"));
         }
         finally
         {
@@ -336,7 +346,7 @@ public class FileClassifierNameTests
         string longStem = new string('a', 3000);
 
         Assert.Equal(FileKind.MediaFile, FileClassifier.ClassifyByName(longStem + ".jpg"));
-        Assert.Equal(FileKind.Unknown, FileClassifier.ClassifyByName(longStem + ".mp3"));
+        Assert.Equal(FileKind.AudioFile, FileClassifier.ClassifyByName(longStem + ".mp3"));
         Assert.Null(FileClassifier.ClassifyByName(longStem));
         // A long run of dots - pathological, but must not hang or throw.
         Assert.Null(FileClassifier.ClassifyByName(new string('.', 3000)));

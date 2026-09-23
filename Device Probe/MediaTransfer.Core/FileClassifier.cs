@@ -30,11 +30,16 @@ public static class FileClassifier
         ".avi", ".mkv", ".webm", ".flv", ".wmv", ".mpg", ".mpeg", ".m2ts", ".mts", ".ts"
     };
 
-    // Audio formats that share the MP4-family "ftyp" container bytes with real
-    // video. Excluded up front so the signature fallback never has to guess:
-    // trying to tell audio-only MP4 variants apart by their major brand was
-    // tested and does not work reliably, because different encoders write
-    // different brands for the same audio-only content.
+    // Recordings, decided by extension and never by reading bytes. Listed
+    // separately from MediaExtensions because the signature fallback must never
+    // see them: audio-only MP4 variants share the "ftyp" container with real
+    // video, and telling them apart by major brand was tested and does not work
+    // reliably - different encoders write different brands for the same
+    // audio-only content.
+    //
+    // Skipping the check is the only thing this list was ever for. It used to
+    // also decide that these files were not worth transferring, and those are
+    // different questions: a voice note is as irreplaceable as a photograph.
     static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".m4a", ".m4b", ".m4p", ".mp3", ".aac", ".wav", ".ogg", ".opus", ".amr", ".flac"
@@ -94,10 +99,8 @@ public static class FileClassifier
 
         if (MediaExtensions.Contains(extension)) return FileKind.MediaFile;
         if (DocumentExtensions.Contains(extension)) return FileKind.Document;
-        if (AudioExtensions.Contains(extension) || KnownNonMediaExtensions.Contains(extension))
-        {
-            return FileKind.Unknown;
-        }
+        if (AudioExtensions.Contains(extension)) return FileKind.AudioFile;
+        if (KnownNonMediaExtensions.Contains(extension)) return FileKind.Unknown;
 
         return null; // caller should fall back to the signature check
     }

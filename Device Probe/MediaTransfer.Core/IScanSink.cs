@@ -114,6 +114,7 @@ public record ScanOutcome(
     bool CameraMode,
     int MediaFiles,
     int Documents,
+    int AudioFiles,
     int UndeterminedFiles,
     int TotalFilesSeen,
     int SubtreeLosses,

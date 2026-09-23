@@ -30,6 +30,7 @@ public sealed class ScanTally
 
     public int MediaFiles { get; private set; }
     public int Documents { get; private set; }
+    public int AudioFiles { get; private set; }
     public int UndeterminedFiles { get; private set; }
 
     /// <summary>
@@ -79,6 +80,7 @@ public sealed class ScanTally
         {
             case FileKind.MediaFile: MediaFiles++; break;
             case FileKind.Document: Documents++; break;
+            case FileKind.AudioFile: AudioFiles++; break;
             case FileKind.Undetermined: UndeterminedFiles++; break;
             // Unknown lands in the total only: examined, and irrelevant. That
             // is a different thing from Undetermined, which was never examined
@@ -128,6 +130,7 @@ public sealed class ScanTally
             CameraMode: cameraMode,
             MediaFiles: MediaFiles,
             Documents: Documents,
+            AudioFiles: AudioFiles,
             UndeterminedFiles: UndeterminedFiles,
             TotalFilesSeen: TotalFilesSeen,
             SubtreeLosses: SubtreeLosses,
