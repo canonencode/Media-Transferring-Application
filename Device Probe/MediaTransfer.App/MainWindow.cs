@@ -16,10 +16,14 @@ public sealed class MainWindow : Form
     readonly WebView2 _web = new() { Dock = DockStyle.Fill };
     readonly ScanStore _store = new(SqliteScanSink.DefaultDatabasePath);
     readonly ScanRunner _runner = new();
-    readonly System.Windows.Forms.Timer _progress = new() { Interval = 500 };
+    // 300 ms rather than 500: the rows are inserted into the list rather than
+    // redrawn, so a shorter interval costs a small indexed read and buys an
+    // arrival that looks continuous instead of stepped.
+    readonly System.Windows.Forms.Timer _progress = new() { Interval = 300 };
 
     bool _ready;
     int _progressFailures;
+    long _lastFileId;
 
     public MainWindow()
     {
@@ -147,6 +151,7 @@ public sealed class MainWindow : Form
             Diagnostics.Write("tarama baslatiliyor: " + ScanRunner.DefaultScannerPath);
             _runner.Start(ScanRunner.DefaultScannerPath);
             _progressFailures = 0;
+            _lastFileId = 0;
             _progress.Start();
             Send(new { type = "scanStarted" });
         }
@@ -168,7 +173,23 @@ public sealed class MainWindow : Form
 
             if (running is { } r)
             {
-                Send(new { type = "progress", files = r.Files, folders = r.Folders });
+                // The rows that arrived since the last tick, so the wait shows
+                // the user their own photographs appearing rather than a number
+                // going up. Capped: nobody reads 700 rows a second, and sending
+                // them would cost more than the scan.
+                var (arrived, lastId) = _store.NewFilesSince(r.ScanId, _lastFileId, 60);
+                _lastFileId = lastId;
+
+                Send(new
+                {
+                    type = "progress",
+                    files = r.Files,
+                    folders = r.Folders,
+                    expected = r.Expected,
+                    folder = r.CurrentFolder,
+                    elapsed = (int)r.ElapsedSeconds,
+                    arrived,
+                });
             }
             else if (!_runner.IsRunning)
             {

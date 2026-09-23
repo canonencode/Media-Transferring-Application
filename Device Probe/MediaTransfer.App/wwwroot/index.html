@@ -83,6 +83,20 @@
   .strip b { font-weight: 600; }
   .strip span { color: var(--ink-2); }
 
+  /* Tarama sirasinda ince bir cizgi. Tahmin varsa doluyor, yoksa gidip
+     geliyor: bilmedigimiz bir orani biliyormus gibi gostermek, dolan ama
+     bitmeyen bir cubuktan daha kotu. */
+  .scanbar { flex: 0 0 auto; height: 2px; background: var(--line-2); overflow: hidden; }
+  .scanbar i { display: block; height: 100%; width: 0; background: var(--ink-2); transition: width .35s linear; }
+  .scanbar.unknown i { width: 28%; animation: sweep 1.6s linear infinite; transition: none; }
+  @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(360%); } }
+  @media (prefers-reduced-motion: reduce) {
+    .scanbar.unknown i { animation: none; width: 100%; opacity: .35; }
+  }
+
+  .live { padding: 9px 16px 7px; font-size: 11px; color: var(--ink-3);
+          text-transform: uppercase; letter-spacing: .07em; border-bottom: 1px solid var(--line); }
+
   /* ---------- sekmeler ---------- */
   .tabs {
     flex: 0 0 auto; display: flex; gap: 2px; padding: 6px 10px 0;
@@ -211,6 +225,7 @@
   </div>
 
   <div class="strip" id="strip" hidden></div>
+  <div class="scanbar" id="scanbar" hidden><i id="scanfill"></i></div>
 
   <div class="tabs" id="tabs" role="tablist"></div>
 

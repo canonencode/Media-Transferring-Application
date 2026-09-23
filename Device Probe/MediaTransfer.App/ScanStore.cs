@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using MediaTransfer.Core;
 using Microsoft.Data.Sqlite;
@@ -45,21 +46,104 @@ public sealed class ScanStore(string databasePath)
         return q.ExecuteScalar() is long id ? id : null;
     }
 
-    /// <summary>Rows written so far by a scan that is still going, for the progress line.</summary>
-    public (long ScanId, int Files, int Folders)? RunningScan()
+    /// <summary>
+    /// What a scan in flight has produced so far.
+    ///
+    /// A count on its own answers none of the questions someone waiting
+    /// actually has. The first scan of a device takes minutes - measured at 327
+    /// seconds against 9 for a warm one, because the driver's cache is cold and
+    /// every property read costs 20 ms instead of 0.2 - so the wait is long
+    /// enough that "is it working" and "how much longer" both need answering.
+    /// </summary>
+    public ScanProgress? RunningScan()
+    {
+        using var c = Open();
+
+        using var q = c.CreateCommand();
+        q.CommandText = "SELECT scan_id, device_key, started_utc FROM scan WHERE status = 'running' ORDER BY scan_id DESC LIMIT 1;";
+        using var head = q.ExecuteReader();
+        if (!head.Read()) return null;
+
+        long id = head.GetInt64(0);
+        string deviceKey = head.GetString(1);
+        string started = head.GetString(2);
+        head.Close();
+
+        using var counts = c.CreateCommand();
+        counts.CommandText = """
+            SELECT (SELECT COUNT(*) FROM file WHERE scan_id = $s),
+                   (SELECT COUNT(*) FROM folder WHERE scan_id = $s),
+                   (SELECT path FROM folder WHERE scan_id = $s ORDER BY folder_id DESC LIMIT 1),
+                   (SELECT total_files_seen FROM scan
+                     WHERE device_key = $d AND status = 'complete' AND scan_id <> $s
+                     ORDER BY scan_id DESC LIMIT 1);
+            """;
+        counts.Parameters.AddWithValue("$s", id);
+        counts.Parameters.AddWithValue("$d", deviceKey);
+        using var r = counts.ExecuteReader();
+        r.Read();
+
+        double elapsed = 0;
+        if (DateTime.TryParseExact(started, "yyyy-MM-dd HH:mm:ss.fff",
+                CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out DateTime startedAt))
+        {
+            elapsed = Math.Max(0, (DateTime.UtcNow - startedAt).TotalSeconds);
+        }
+
+        return new ScanProgress(
+            ScanId: id,
+            Files: r.GetInt32(0),
+            Folders: r.GetInt32(1),
+            CurrentFolder: r.IsDBNull(2) ? null : StripStorageRoot(r.GetString(2)),
+            // An estimate, and only ever shown as one: it is what this device
+            // held last time, and a phone gains and loses files between scans.
+            // Better than no scale at all, which is what a bare count gives.
+            Expected: r.IsDBNull(3) ? null : r.GetInt32(3),
+            ElapsedSeconds: elapsed);
+    }
+
+    /// <summary>
+    /// Files committed since the caller last asked, newest first.
+    ///
+    /// Fetched by id rather than by re-reading the scan, so the cost stays
+    /// proportional to what arrived rather than to what has been found so far -
+    /// the difference between a few rows and fourteen thousand, twice a second.
+    /// </summary>
+    public (List<object> Files, long LastId) NewFilesSince(long scanId, long afterFileId, int max)
     {
         using var c = Open();
         using var q = c.CreateCommand();
-        q.CommandText = "SELECT scan_id FROM scan WHERE status = 'running' ORDER BY scan_id DESC LIMIT 1;";
-        if (q.ExecuteScalar() is not long id) return null;
+        q.CommandText = """
+            SELECT file_id, path, name, size, kind, modified_raw
+            FROM file WHERE scan_id = $s AND file_id > $after AND kind IN ('MediaFile', 'Document')
+            ORDER BY file_id DESC LIMIT $max;
+            """;
+        q.Parameters.AddWithValue("$s", scanId);
+        q.Parameters.AddWithValue("$after", afterFileId);
+        q.Parameters.AddWithValue("$max", max);
 
-        using var counts = c.CreateCommand();
-        counts.CommandText =
-            "SELECT (SELECT COUNT(*) FROM file WHERE scan_id = $s), (SELECT COUNT(*) FROM folder WHERE scan_id = $s);";
-        counts.Parameters.AddWithValue("$s", id);
-        using var r = counts.ExecuteReader();
-        r.Read();
-        return (id, r.GetInt32(0), r.GetInt32(1));
+        var files = new List<object>();
+        long last = afterFileId;
+        using var r = q.ExecuteReader();
+        while (r.Read())
+        {
+            long fileId = r.GetInt64(0);
+            string path = r.GetString(1);
+            string modified = r.IsDBNull(5) ? "" : r.GetString(5);
+            last = Math.Max(last, fileId);
+
+            files.Add(new
+            {
+                n = r.GetString(2),
+                p = StripStorageRoot(path),
+                s = r.IsDBNull(3) ? 0 : r.GetInt64(3),
+                k = r.GetString(4),
+                d = modified.Length >= 10 ? modified[..10] : modified,
+                src = MediaSource.Classify(path).Id,
+            });
+        }
+        return (files, last);
     }
 
     /// <summary>Everything the window needs for one scan, shaped for the page.</summary>
@@ -176,3 +260,8 @@ public sealed class ScanStore(string databasePath)
         return list;
     }
 }
+
+/// <param name="Expected">Files the last complete scan of this device saw, or null on a first scan.</param>
+/// <param name="CurrentFolder">The most recent folder the walk entered.</param>
+public readonly record struct ScanProgress(
+    long ScanId, int Files, int Folders, string? CurrentFolder, int? Expected, double ElapsedSeconds);

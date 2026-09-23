@@ -41,6 +41,8 @@
   var state = { tab: "all", sort: "d", dir: -1, scanning: false };
 
   var strip = document.getElementById("strip");
+  var scanbar = document.getElementById("scanbar");
+  var scanfill = document.getElementById("scanfill");
   var tabs = document.getElementById("tabs");
   var content = document.getElementById("content");
   var statusbar = document.getElementById("statusbar");
@@ -100,21 +102,23 @@
       else if (m.type === "error") { showNotice(m.message, false); }
       else if (m.type === "scanStarted") {
         state.scanning = true;
+        openLive();
         rescan.disabled = true;
-        setStrip("info", "Taranıyor.", "Telefon okunuyor, bu birkaç dakika sürebilir.");
+        scanbar.hidden = false;
+        scanbar.className = "scanbar unknown";
+        setStrip("info", "Taranıyor.", "Telefon okunuyor.");
       }
       else if (m.type === "progress") {
-        if (state.scanning) {
-          setStrip("info", "Taranıyor.",
-            fmtInt(m.files) + " dosya, " + fmtInt(m.folders) + " klasör bulundu.");
-        }
+        if (state.scanning) showProgress(m);
       }
       else if (m.type === "progressLost") {
         setStrip("", "İlerleme okunamıyor.", m.message);
       }
       else if (m.type === "scanEnded") {
         state.scanning = false;
+        liveRows = null;
         rescan.disabled = false;
+        scanbar.hidden = true;
         if (m.crashed) setStrip("", "Tarama yarıda kaldı.", m.message);
       }
     });
@@ -129,6 +133,87 @@
     }
     send({ cmd: "scan" });
   });
+
+  function fmtClock(sec) {
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return m ? m + " dk " + s + " sn" : s + " sn";
+  }
+
+  function showProgress(m) {
+    var parts = [];
+    if (m.expected && m.expected > 0 && m.files <= m.expected) {
+      // "yaklasik", cunku bu gecen taramanin sayisi ve telefon o gunden beri
+      // dosya kazanmis ya da kaybetmis olabilir. Olcek vermek, hic olcek
+      // vermemekten iyi; kesinmis gibi gostermek ikisinden de kotu.
+      parts.push(fmtInt(m.files) + " / yaklaşık " + fmtInt(m.expected) + " dosya");
+      scanbar.className = "scanbar";
+      scanfill.style.width = Math.min(100, 100 * m.files / m.expected).toFixed(1) + "%";
+    } else {
+      parts.push(fmtInt(m.files) + " dosya");
+      scanbar.className = "scanbar unknown";
+    }
+    parts.push(fmtInt(m.folders) + " klasör");
+    if (m.elapsed) parts.push(fmtClock(m.elapsed));
+    if (m.folder) parts.push(m.folder);
+
+    setStrip("info", "Taranıyor.", parts.join("  ·  "));
+
+    if (m.arrived && m.arrived.length) addLive(m.arrived);
+  }
+
+  /* Bekleme sirasinda sayinin artmasini izlemek, calisip calismadigini
+     soylemiyor. Dosyalarin kendisini izlemek soyluyor.
+
+     Gelen satirlar mevcut listenin basina EKLENIYOR, liste her yarim saniyede
+     bir bastan cizilmiyor. Bastan cizmek 300 satirlik bir DOM'u saniyede iki
+     kez yikip kuruyordu ve goz bunu titreme olarak goruyor; ayrica kaydirma
+     konumunu da her seferinde sifirliyordu. */
+
+  var liveHead = null;
+  var liveRows = null;
+
+  function liveRow(f) {
+    var r = el("div", "row");
+    var nm = el("span", "nm");
+    nm.appendChild(document.createTextNode(f.n));
+    nm.appendChild(document.createTextNode("  "));
+    nm.appendChild(el("span", "src", (D && D.labels && D.labels[f.src]) || ""));
+    r.appendChild(nm);
+    r.appendChild(el("span", "meta r c-type", tur(f)));
+    r.appendChild(el("span", "meta r num", fmtBytes(f.s)));
+    r.appendChild(el("span", "meta r num c-date", fmtDate(f.d)));
+    return r;
+  }
+
+  function openLive() {
+    content.innerHTML = "";
+    liveHead = el("div", "live", "İlk dosyalar bekleniyor");
+    liveRows = el("div");
+    content.appendChild(liveHead);
+    content.appendChild(liveRows);
+  }
+
+  function addLive(files) {
+    if (!liveRows || !liveRows.isConnected) openLive();
+    if (!files.length) return;
+
+    liveHead.textContent = "Bulunanlar, en yenisi üstte";
+
+    // Ustte duruyorsa yeni satirlar akip gelsin. Asagi kaydirmissa okudugu
+    // yerde kalsin: ustten eklemek icerigi asagi iter ve satirlar elinin
+    // altindan kayar.
+    var pinned = content.scrollTop > 4;
+    var before = liveRows.offsetHeight;
+
+    var block = document.createDocumentFragment();
+    files.forEach(function (f) { block.appendChild(liveRow(f)); });
+    liveRows.insertBefore(block, liveRows.firstChild);
+
+    while (liveRows.children.length > 300) {
+      liveRows.removeChild(liveRows.lastChild);
+    }
+    if (pinned) content.scrollTop += liveRows.offsetHeight - before;
+  }
 
   function showNotice(message, offerScan) {
     tabs.innerHTML = "";
@@ -363,6 +448,9 @@
   /* ---------------- frame ---------------- */
 
   function render() {
+    // Tarama surerken ekran canli akisa ait ve ona dokunulmaz; bastan cizmek
+    // tam da kacinilan titremeyi geri getirirdi.
+    if (state.scanning) return;
     content.innerHTML = "";
     if (state.tab === "scan") renderScanTab();
     else renderList();
