@@ -73,6 +73,7 @@
   var VIDEO = { mp4:1, mov:1, mkv:1, webm:1, "3gp":1, avi:1, m4v:1 };
   function tur(f) {
     if (f.k === "Document") return "Belge";
+    if (f.k === "AudioFile") return "Ses";
     var e = ext(f.n);
     if (PHOTO[e]) return "Fotoğraf";
     if (VIDEO[e]) return "Video";
@@ -101,7 +102,7 @@
 
       if (m.type === "data") { D = m.payload; boot(); }
       else if (m.type === "empty") { showNotice(m.message, true); }
-      else if (m.type === "error") { showNotice(m.message, false); }
+      else if (m.type === "error") { showError(m.message); }
       else if (m.type === "scanStarted") {
         state.scanning = true;
         openLive();
@@ -314,7 +315,14 @@
   }
 
   function askPreflight() {
-    if (!setupState.root || setupState.scanId == null) return;
+    // Sebepsiz bir "Hesaplaniyor..." sonsuza kadar oyle kalir. Hangi
+    // eksikse onu soylemek, donmus bir ekrandan her zaman iyidir.
+    // drawSetup cagriliyor, cunku bu fonksiyon cizimden SONRA calisiyor:
+    // sebebi yazip cizmemek, ekranda "Hesaplaniyor..." birakmak demek - tam
+    // da onlemeye calistigi sey.
+    if (setupState.scanId == null) { setupState.blocked = "Tamamlanmış tarama yok."; drawSetup(); return; }
+    if (!setupState.root) { setupState.blocked = "Kullanılabilir sürücü yok."; drawSetup(); return; }
+    setupState.blocked = null;
 
     // Sorulacak bir sey yok, ve sormamak eski sayilari ekranda birakmasin.
     if (pickedSources() === null) {
@@ -464,7 +472,9 @@
     }
 
     var p = setupState.pre;
-    if (pickedSources() === null) {
+    if (setupState.blocked) {
+      box.appendChild(el("p", "dest", setupState.blocked));
+    } else if (pickedSources() === null) {
       box.appendChild(el("p", "dest", "Hiçbir kaynak seçili değil."));
     } else if (p) {
       var dest = el("p", "dest");
@@ -479,7 +489,13 @@
         r.appendChild(el("span", null, b));
         led.appendChild(r);
       }
-      row("Aktarılacak dosya", fmtInt(p.files));
+      var toCopy = (p.toCopy == null) ? p.files : p.toCopy;
+      row("Aktarılacak dosya", fmtInt(toCopy));
+      if (toCopy !== p.files) {
+        // Devam ettirilen bir aktarim. Secilenin tamamini yazmak, 3 GB'lik
+        // isi 22 GB gibi gosterip sigan bir surucuyu reddettiriyordu.
+        row("Zaten bu klasörde", fmtInt(p.files - toCopy));
+      }
       if (p.renamed > 0) row("Adı değiştirilecek", fmtInt(p.renamed));
       row("Gereken yer", fmtBytes(p.required));
       row("Boş yer", fmtBytes(p.free));
@@ -509,6 +525,23 @@
     setup.appendChild(box);
   }
 
+  /* Kurulum paneli acikken gelen hata, listeyi yok etmemeli.
+
+     showNotice tabs/content/statusbar'i sifirliyor. Kullanici "Aktarimi
+     baslat"a bastiginda host on kontrolu yeniden yapiyor - bilerek, cunku
+     disk bakilmakla basilmak arasinda dolabilir - ve "yer yok" cevabi
+     geldiginde arkadaki dosya listesi, sekmeler ve durum cubugu siliniyordu.
+     Kurulum paneli de acik kaliyordu, dugmesi kapali, geri donusu yok:
+     uygulamayi yeniden baslatmaktan baska caresi olmayan bir ekran. */
+  function showError(message) {
+    if (!setup.hidden) {
+      setStrip("", "Olmadı.", message);
+      drawSetup();            // dugmeyi yeniden etkinlestiren tek yer
+      return;
+    }
+    showNotice(message, false);
+  }
+
   function showNotice(message, offerScan) {
     tabs.innerHTML = "";
     content.innerHTML = "";
@@ -526,7 +559,8 @@
      yazilmis ve dogrulanmis dosya sayisi. Surec olse bile satirlar yerinde
      kaliyor, o yuzden bitis ozeti de ayni yerden geliyor. */
 
-  var copyTitle = null, copyHead = null, copyNow = null, copyLed = null, copyPlanned = 0;
+  var copyTitle = null, copyHead = null, copyNow = null, copyLed = null;
+  var copyPlanned = 0, copyAlready = 0;
 
   function copyRow(led, a, b, cls) {
     var r = el("div", "r" + (cls ? " " + cls : ""));
@@ -538,6 +572,7 @@
 
   function openCopy(m) {
     copyPlanned = m.files || 0;
+    copyAlready = m.alreadyThere || 0;
     content.innerHTML = "";
     content.scrollTop = 0;
 
@@ -550,7 +585,8 @@
     dest.appendChild(el("b", null, m.destination));
     box.appendChild(dest);
 
-    copyHead = el("p", "dest", fmtInt(copyPlanned) + " dosya, " + fmtBytes(m.bytes));
+    copyHead = el("p", "dest", fmtInt(copyPlanned) + " dosya, " + fmtBytes(m.bytes)
+      + (copyAlready ? "  ·  " + fmtInt(copyAlready) + " dosya zaten burada" : ""));
     box.appendChild(copyHead);
 
     copyNow = el("div", "live", "İlk dosya açılıyor");
@@ -586,7 +622,11 @@
   }
 
   function endCopy(m) {
-    if (!copyLed || !copyLed.isConnected) return;
+    // Panel gitmisse yeniden kur: ozet, gosterilecek yer olmadigi icin
+    // kaybolacak son sey olmali.
+    if (!copyLed || !copyLed.isConnected) {
+      openCopy({ destination: "", files: m.planned || 0, bytes: 0 });
+    }
 
     // Host defteri okuyamamis. Sayi uydurmak yerine okunamadigini soyluyor:
     // dosyalar kopyalanmis olabilir ve "0 dosya, hepsi yerinde" yazmak,
@@ -860,7 +900,12 @@
   function render() {
     // Tarama surerken ekran canli akisa ait ve ona dokunulmaz; bastan cizmek
     // tam da kacinilan titremeyi geri getirirdi.
-    if (state.scanning) return;
+    //
+    // Aktarim da oyle: content'i temizlemek uzerinde duran aktarim panelini
+    // yok ediyor, bir sonraki ilerleme tiki onu bostan yeniden kuruyor, ve
+    // ikisi saniyede bir birbirinin yerini aliyor. Bitis ozeti o araliga denk
+    // gelirse hic gorunmuyor.
+    if (state.scanning || state.copying) return;
     content.innerHTML = "";
     if (state.tab === "scan") renderScanTab();
     else renderList();

@@ -1385,29 +1385,13 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources, bool 
         string target = Path.Combine(destinationRoot,
             planned.RelativePath.Replace('/', Path.DirectorySeparatorChar));
         remembered.TryGetValue(planned.Item.DevicePath, out CopyRecord? previous);
-
-        // The file the RECORD is about, which is not always the one the plan
-        // would choose today. A version kept alongside an older one lives under
-        // a numbered name while the plan, being deterministic, goes on pointing
-        // at the bare one. Measuring the plan's choice against a record about a
-        // different file answers a question nobody asked: it says "already
-        // there" for a photograph that was never copied, and "wrong length" for
-        // one that is perfectly fine - and that second answer leads straight to
-        // the delete below.
-        // ...but only when that record points INSIDE the folder being written
-        // to now. The question is "is this file already HERE", and a record
-        // about a copy on some other drive cannot answer it. Getting that wrong
-        // is not theoretical: a backup to this machine skipped 2,044 files
-        // because an earlier run had put them on an external disk - which by
-        // then had dropped off the bus and lost them - and reported "already
-        // there" for every one.
-        string measured = previous is { Status: "done" } && IsUnder(previous.Destination, destinationRoot)
-            ? previous.Destination
-            : target;
-        bool measuredExists = File.Exists(measured);
-
-        var decision = CopyDecision.Decide(previous, planned.Item.Size, planned.Item.ModifiedRaw,
-            measuredExists, measuredExists ? new FileInfo(measured).Length : 0);
+        // ForTarget rather than the rule written out here: the setup page
+        // measures free space with the same call, and the one afternoon these
+        // were two separate implementations produced a resumed transfer that
+        // was quoted the full 22 GB it did not need and then reported the
+        // files it had skipped as never reached.
+        var decision = CopyDecision.ForTarget(previous, planned.Item, target, destinationRoot,
+            File.Exists, path => new FileInfo(path).Length);
 
         if (decision == CopyAction.Skip)
         {
@@ -1850,16 +1834,6 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources, bool 
         }
         Console.WriteLine("    Add \"all\" as the last argument to take these too.");
     }
-}
-
-// Whether a recorded destination belongs to the folder being written to now.
-// Compared as full paths with a trailing separator, so "D:/A56 yedek" and
-// "D:/A56 yedek 2" cannot be mistaken for one another.
-bool IsUnder(string path, string root)
-{
-    string full = Path.GetFullPath(root);
-    if (!full.EndsWith(Path.DirectorySeparatorChar)) full += Path.DirectorySeparatorChar;
-    return Path.GetFullPath(path).StartsWith(full, StringComparison.OrdinalIgnoreCase);
 }
 
 // Streamed rather than File.ReadAllBytes: some of these are video files - the

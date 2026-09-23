@@ -119,6 +119,31 @@ public sealed class ProbeRunner
         _process = process;
     }
 
+    /// <summary>
+    /// Kills the running child, if there is one.
+    ///
+    /// Safe by construction rather than by luck: every finished file is already
+    /// renamed into place and committed to the ledger, and the one in flight is
+    /// a .part the next run deletes. Killing is what the transfer design is FOR.
+    /// Leaving it alive is the unsafe option - a child outlives this process
+    /// (UseShellExecute = false puts it in no job object), keeps writing ledger
+    /// rows, and the next transfer counts them as its own work.
+    /// </summary>
+    public void Stop()
+    {
+        var process = _process;
+        if (process is null) return;
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch (Exception)
+        {
+            // Already gone, or never ours to kill. Either way there is nothing
+            // to stop, and failing to close a window over it helps nobody.
+        }
+    }
+
     static void Remember(Queue<string> tail, string? line)
     {
         if (line is null) return;

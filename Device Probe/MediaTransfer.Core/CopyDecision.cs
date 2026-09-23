@@ -68,6 +68,63 @@ public record CopyRecord(
 /// </summary>
 public static class CopyDecision
 {
+    /// <summary>
+    /// The decision for one planned file, disk lookups included.
+    ///
+    /// This exists because the rule has two callers who must never disagree:
+    /// the copier, which acts on it, and the setup page, which measures free
+    /// space and tells the user how many files will move. They were separate
+    /// implementations for one afternoon and that was enough - the page counted
+    /// every file in the selection while the copier skipped the ones already
+    /// present, so a resumed transfer was quoted the full 22 GB, refused for
+    /// want of space it did not need, and then reported thousands of files as
+    /// "never reached" after finishing the job.
+    ///
+    /// The filesystem arrives as two delegates rather than as calls to File,
+    /// which keeps this testable without a disk and makes explicit that exactly
+    /// two questions get asked of it.
+    /// </summary>
+    /// <param name="target">Where the plan says this file goes today.</param>
+    /// <param name="destinationRoot">The folder being written to on this run.</param>
+    public static CopyAction ForTarget(
+        CopyRecord? previous,
+        TransferItem item,
+        string target,
+        string destinationRoot,
+        Func<string, bool> exists,
+        Func<string, long> lengthOf)
+    {
+        // Which file on disk answers "is this already backed up".
+        //
+        // Normally the plan's own target. The exception is a version kept beside
+        // an older one: it lives under a numbered name while the plan, being
+        // deterministic, goes on pointing at the bare one.
+        //
+        // And only when the record points INSIDE the folder being written to
+        // now, because the question is "is this file already HERE". A record
+        // about a copy on another drive cannot answer it - a backup once
+        // skipped 2,044 files on that mistake, reporting "already there" for
+        // every one while the drive that held them had dropped off the bus.
+        string measured = previous is { Status: "done" } && IsUnder(previous.Destination, destinationRoot)
+            ? previous.Destination
+            : target;
+
+        bool there = exists(measured);
+        return Decide(previous, item.Size, item.ModifiedRaw, there, there ? lengthOf(measured) : 0);
+    }
+
+    /// <summary>
+    /// Whether a recorded destination belongs to the folder being written to
+    /// now. Full paths with a trailing separator, so "D:/yedek" and
+    /// "D:/yedek 2" cannot be mistaken for one another.
+    /// </summary>
+    public static bool IsUnder(string path, string root)
+    {
+        string full = Path.GetFullPath(root);
+        if (!full.EndsWith(Path.DirectorySeparatorChar)) full += Path.DirectorySeparatorChar;
+        return Path.GetFullPath(path).StartsWith(full, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static CopyAction Decide(
         CopyRecord? previous,
         long sourceSize,

@@ -89,6 +89,26 @@ public sealed class MainWindow : Form
         core.Navigate("https://app.local/index.html");
     }
 
+    /// <summary>
+    /// Nothing may outlive this window.
+    ///
+    /// The child is a separate process precisely so a wedged phone cannot take
+    /// the window down with it - but that independence cuts both ways. Closed
+    /// without this, the copier kept running unseen, kept committing rows, and
+    /// the next transfer's baseline counted them as its own: a progress line
+    /// reading 18,400 of 13,630, from two processes' work added together.
+    /// </summary>
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (_runner.IsRunning)
+        {
+            Diagnostics.Write($"pencere kapaniyor, {_runner.Job} durduruluyor");
+            _runner.Stop();
+        }
+        _progress.Stop();
+        base.OnFormClosing(e);
+    }
+
     void ShowStartupFailure(string message)
     {
         Controls.Remove(_web);
@@ -242,6 +262,7 @@ public sealed class MainWindow : Form
                 destination = p.Destination,
                 required = p.RequiredBytes,
                 files = p.Files,
+                toCopy = p.ToCopy,
                 renamed = p.Renamed,
                 free = p.FreeBytes,
                 fits = p.Fits,
@@ -283,6 +304,11 @@ public sealed class MainWindow : Form
                 Send(new { type = "error", message = "Seçilen kaynaklarda aktarılacak dosya yok." });
                 return;
             }
+            if (check.ToCopy == 0)
+            {
+                Send(new { type = "error", message = "Seçilen dosyaların hepsi zaten bu klasörde." });
+                return;
+            }
             if (!check.Fits)
             {
                 Send(new { type = "error", message = check.Problem ?? "Bu konuma aktarılamaz." });
@@ -293,7 +319,11 @@ public sealed class MainWindow : Form
             // meantime would fall on the wrong side of the mark and go missing
             // from the count for the rest of the transfer.
             _copyBaseline = _store.Exists() ? _store.LatestCopyId() : 0;
-            _copyPlanned = check.Files;
+            // What will MOVE, not what was selected. The child writes a ledger
+            // row only for a file it actually copies, so planning against the
+            // selection made a resumed transfer report every file it had
+            // rightly skipped as "never reached".
+            _copyPlanned = check.ToCopy;
             _copyPlannedBytes = check.RequiredBytes;
 
             Diagnostics.Write($"aktarim baslatiliyor: tarama {scanId} -> {check.Destination}");
@@ -306,7 +336,8 @@ public sealed class MainWindow : Form
             {
                 type = "transferStarted",
                 destination = check.Destination,
-                files = check.Files,
+                files = check.ToCopy,
+                alreadyThere = check.Files - check.ToCopy,
                 bytes = check.RequiredBytes,
             });
         }
@@ -433,29 +464,49 @@ public sealed class MainWindow : Form
     {
         // Raised on a thread pool thread. Everything below touches the window.
         Diagnostics.Write($"{exit.Job} cikti: kod {exit.ExitCode}, crashed={exit.Crashed}");
-        if (IsDisposed) return;
-        BeginInvoke(() =>
+
+        // IsDisposed alone is not enough. Between that check and the call the
+        // handle can be destroyed while IsDisposed is still false, and
+        // BeginInvoke then throws on a thread-pool thread with no handler above
+        // it - so closing the window while a scan is running took the whole app
+        // down with a crash report instead of closing it. The scanner's own
+        // watchdog calls FailFast precisely when someone has given up and
+        // closed the window, which is what makes the race ordinary rather than
+        // exotic.
+        if (IsDisposed || !IsHandleCreated) return;
+
+        try
         {
-            _progress.Stop();
-
-            if (exit.Job == ProbeJob.Copy)
+            BeginInvoke(() =>
             {
-                EndTransfer(exit);
-                return;
-            }
+                _progress.Stop();
 
-            Send(new
-            {
-                type = "scanEnded",
-                crashed = exit.Crashed,
-                exitCode = exit.ExitCode,
-                message = exit.Crashed
-                    ? "Tarayıcı beklenmedik şekilde kapandı. Genellikle cihazın kilitlenmesi demektir: " +
-                      "kabloyu çıkarıp takın ve tekrar deneyin."
-                    : "",
+                if (exit.Job == ProbeJob.Copy)
+                {
+                    EndTransfer(exit);
+                    return;
+                }
+
+                Send(new
+                {
+                    type = "scanEnded",
+                    crashed = exit.Crashed,
+                    exitCode = exit.ExitCode,
+                    message = exit.Crashed
+                        ? "Tarayıcı beklenmedik şekilde kapandı. Genellikle cihazın kilitlenmesi " +
+                          "demektir: kabloyu çıkarıp takın ve tekrar deneyin."
+                        : "",
+                });
+                SendScan();
             });
-            SendScan();
-        });
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+        {
+            // The window went away while this was being posted to it. There is
+            // nothing left to tell and nobody to tell it to; the ledger already
+            // holds whatever the child managed.
+            Diagnostics.Write("cikis haberi pencereye ulasmadi: " + ex.GetType().Name);
+        }
     }
 
     /// <summary>
@@ -470,7 +521,25 @@ public sealed class MainWindow : Form
     /// </summary>
     void EndTransfer(ProbeExit exit)
     {
-        long baseline = _copyBaseline ?? 0;
+        // No baseline means this method cannot say what THIS run did, and 0
+        // would make it report the whole ledger - every file ever taken off
+        // this phone - as the work of one transfer. Saying so is the honest
+        // answer and the page already knows how to draw it.
+        if (_copyBaseline is not { } baseline)
+        {
+            Diagnostics.Write("aktarim bitti ama baslangic isareti yok, sayilar bu kosuya ait degil");
+            Send(new
+            {
+                type = "transferEnded",
+                unknown = true,
+                crashed = exit.Crashed,
+                planned = _copyPlanned,
+                failures = Array.Empty<object>(),
+                message = "Aktarım bitti ama bu koşuda kaç dosyanın aktarıldığı belirlenemedi. " +
+                    "Kopyalanan dosyalar yerinde; listeyi yenilemek doğru sayıyı gösterir.",
+            });
+            return;
+        }
         _copyBaseline = null;
 
         try
@@ -481,6 +550,17 @@ public sealed class MainWindow : Form
 
             Diagnostics.Write($"aktarim bitti: {p.Done} kopyalandi, {p.Failed} basarisiz, " +
                 $"{notReached} ulasilmadi, kod {exit.ExitCode}");
+
+            // The copier has eight ways to refuse before it moves a byte - no
+            // device, a scan belonging to another phone, a drive that is not
+            // ready - and each one is a plain message on its stdout. Without
+            // this the window drew "0 copied, everything missing" and never
+            // said why, which is the same silence this project keeps finding.
+            string why = "";
+            if (p.Done == 0 && !exit.Crashed && !string.IsNullOrWhiteSpace(exit.LastOutput))
+            {
+                why = "Kopyalayıcı hiçbir dosya aktarmadı. Söylediği:\n" + exit.LastOutput.Trim();
+            }
 
             Send(new
             {
@@ -494,8 +574,9 @@ public sealed class MainWindow : Form
                 failures,
                 message = exit.Crashed
                     ? "Aktarım beklenmedik şekilde durdu. Kopyalanan dosyalar yerinde; kabloyu çıkarıp " +
-                      "takın ve tekrar başlatın, biten dosyalar ikinci kez kopyalanmaz."
-                    : "",
+                      "takın ve tekrar başlatın, biten dosyalar ikinci kez kopyalanmaz.\n" +
+                      exit.LastOutput.Trim()
+                    : why,
             });
         }
         catch (Exception ex)
