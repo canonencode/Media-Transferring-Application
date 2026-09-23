@@ -19,6 +19,7 @@ public sealed class MainWindow : Form
     readonly System.Windows.Forms.Timer _progress = new() { Interval = 500 };
 
     bool _ready;
+    int _progressFailures;
 
     public MainWindow()
     {
@@ -91,11 +92,12 @@ public sealed class MainWindow : Form
 
     void OnMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
-        string command;
+        string command, text = "";
         try
         {
             using var doc = JsonDocument.Parse(e.WebMessageAsJson);
             command = doc.RootElement.TryGetProperty("cmd", out var c) ? c.GetString() ?? "" : "";
+            if (doc.RootElement.TryGetProperty("text", out var t)) text = t.GetString() ?? "";
         }
         catch (JsonException)
         {
@@ -106,6 +108,7 @@ public sealed class MainWindow : Form
         {
             case "load": SendScan(); break;
             case "scan": StartScan(); break;
+            case "log": Diagnostics.Write(text); break;
         }
     }
 
@@ -125,10 +128,13 @@ public sealed class MainWindow : Form
                 Send(new { type = "empty", message = "Tamamlanmış tarama yok." });
                 return;
             }
-            SendRaw("{\"type\":\"data\",\"payload\":" + _store.PayloadJson(id.Value) + "}");
+            string payload = _store.PayloadJson(id.Value);
+            Diagnostics.Write($"tarama #{id} gonderiliyor, {payload.Length} karakter");
+            SendRaw("{\"type\":\"data\",\"payload\":" + payload + "}");
         }
         catch (Exception ex)
         {
+            Diagnostics.Write("kayitlar okunamadi: " + ex);
             Send(new { type = "error", message = "Kayıtlar okunamadı: " + ex.Message });
         }
     }
@@ -138,12 +144,15 @@ public sealed class MainWindow : Form
         if (_runner.IsRunning) return;
         try
         {
+            Diagnostics.Write("tarama baslatiliyor: " + ScanRunner.DefaultScannerPath);
             _runner.Start(ScanRunner.DefaultScannerPath);
+            _progressFailures = 0;
             _progress.Start();
             Send(new { type = "scanStarted" });
         }
         catch (Exception ex)
         {
+            Diagnostics.Write("tarama baslatilamadi: " + ex.Message);
             Send(new { type = "error", message = ex.Message });
         }
     }
@@ -155,21 +164,48 @@ public sealed class MainWindow : Form
         try
         {
             var running = _store.Exists() ? _store.RunningScan() : null;
+            _progressFailures = 0;
+
             if (running is { } r)
             {
                 Send(new { type = "progress", files = r.Files, folders = r.Folders });
             }
+            else if (!_runner.IsRunning)
+            {
+                // No running row and no child process: the scan is over and the
+                // exit notice did not arrive. Ending it here rather than leaving
+                // a counter frozen forever - a stuck number with no explanation
+                // is the failure this project keeps finding, and the progress
+                // loop is not allowed to be the thing that produces one.
+                Diagnostics.Write("progress: tarama bitmis ama cikis haberi gelmemis, kapatiliyor");
+                _progress.Stop();
+                Send(new { type = "scanEnded", crashed = false, exitCode = 0, message = "" });
+                SendScan();
+            }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // A read that loses a race with a commit is not worth reporting;
-            // the next tick half a second later will get it.
+            // One failed read is a lost race with a commit and the next tick
+            // half a second later will get it. A run of them is a real problem,
+            // and silence about it would leave the user watching a number that
+            // has quietly stopped meaning anything.
+            _progressFailures++;
+            Diagnostics.Write($"progress hatasi ({_progressFailures}): {ex.GetType().Name}: {ex.Message}");
+            if (_progressFailures == 6)
+            {
+                Send(new
+                {
+                    type = "progressLost",
+                    message = "Tarama sürüyor ama ilerleme okunamıyor: " + ex.Message,
+                });
+            }
         }
     }
 
     void OnScannerExited(ScanExit exit)
     {
         // Raised on a thread pool thread. Everything below touches the window.
+        Diagnostics.Write($"tarayici cikti: kod {exit.ExitCode}, crashed={exit.Crashed}");
         if (IsDisposed) return;
         BeginInvoke(() =>
         {
@@ -192,7 +228,20 @@ public sealed class MainWindow : Form
 
     void SendRaw(string json)
     {
-        if (!_ready || _web.CoreWebView2 is null) return;
-        _web.CoreWebView2.PostWebMessageAsJson(json);
+        if (!_ready || _web.CoreWebView2 is null)
+        {
+            Diagnostics.Write("gonderilemedi, WebView hazir degil: " + json[..Math.Min(60, json.Length)]);
+            return;
+        }
+        try
+        {
+            _web.CoreWebView2.PostWebMessageAsJson(json);
+        }
+        catch (Exception ex)
+        {
+            // A message that cannot cross the bridge leaves the page showing
+            // whatever it last knew, which is worse than showing nothing.
+            Diagnostics.Write($"kopru hatasi ({json.Length} karakter): {ex.GetType().Name}: {ex.Message}");
+        }
     }
 }

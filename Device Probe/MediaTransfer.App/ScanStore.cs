@@ -116,13 +116,17 @@ public sealed class ScanStore(string databasePath)
         var payload = new
         {
             device = Row(c, "SELECT * FROM device LIMIT 1;"),
-            scans = Rows(c, """
-                SELECT scan_id, status, started_utc, finished_utc, media_files, documents,
-                       total_files_seen, subtree_losses, stalled, completed,
-                       signature_checks_run, caught_by_signature_only, file_property_misses,
-                       hidden_subtrees, still_unreadable
-                FROM scan ORDER BY scan_id DESC;
-                """),
+            // SELECT * rather than a column list, and that is the whole
+            // schema-compatibility story for the reader.
+            //
+            // The writer owns the schema and upgrades the file when it opens
+            // it; this side only reads, so it can meet a database older than
+            // the build - one written before a column existed, on a machine
+            // where no scan has run since. A fixed list fails outright on such
+            // a file ("no such column"), which is a blank window instead of the
+            // scans it does have. Asking for whatever is there leaves the page
+            // to check for the fields it wants, and it already does.
+            scans = Rows(c, "SELECT * FROM scan ORDER BY scan_id DESC;"),
             skipped = Rows(c, "SELECT path, reason FROM skipped_folder WHERE scan_id = " + scanId + " ORDER BY path;"),
             agg = agg.ToDictionary(kv => kv.Key, kv => (object)new { media = kv.Value.media, doc = kv.Value.doc, other = kv.Value.other, bytes = kv.Value.bytes }),
             labels,

@@ -755,4 +755,143 @@ public class SqliteScanSinkTests
 
         Assert.Equal(10, db.Count("scan"));
     }
+
+    // ---- Schema version -----------------------------------------------------
+    //
+    // CREATE TABLE IF NOT EXISTS does nothing to a database that already has the
+    // table, so a column added to the schema text would reach new files only and
+    // then fail at INSERT time on a user's machine. Tests never caught that,
+    // because every test opens a fresh file - which is exactly why these use an
+    // old-shaped database on purpose.
+
+    static long ReadUserVersion(TempDatabase db) =>
+        (long)(db.Scalar("PRAGMA user_version;") ?? 0L);
+
+    [Fact]
+    public void ANewDatabase_IsStampedWithTheCurrentSchemaVersion()
+    {
+        using var db = new TempDatabase();
+        using (var sink = new SqliteScanSink(db.Path))
+        {
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnScanFinished(CleanOutcome());
+        }
+
+        Assert.Equal(SqliteScanSink.SchemaVersion, ReadUserVersion(db));
+    }
+
+    [Fact]
+    public void AnOlderDatabase_GainsTheColumnItWasMissing()
+    {
+        // A version-1 file: the tables exist, the stamp does not, and neither
+        // does the column added since. This is what every database written
+        // before versioning looks like.
+        using var db = new TempDatabase();
+        using (var sink = new SqliteScanSink(db.Path))
+        {
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnScanFinished(CleanOutcome());
+        }
+        using (var c = db.Open())
+        {
+            using var drop = c.CreateCommand();
+            drop.CommandText = "ALTER TABLE scan DROP COLUMN unresolved_objects; PRAGMA user_version = 0;";
+            drop.ExecuteNonQuery();
+        }
+        Assert.Equal(0L, ReadUserVersion(db));
+
+        // Opening it is the upgrade.
+        using (var sink = new SqliteScanSink(db.Path))
+        {
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnScanFinished(CleanOutcome() with { UnresolvedObjects = 4 });
+        }
+
+        Assert.Equal(SqliteScanSink.SchemaVersion, ReadUserVersion(db));
+        Assert.Equal(1, db.Count("scan", "unresolved_objects = 4"));
+    }
+
+    [Fact]
+    public void AnOlderDatabase_KeepsTheScansItAlreadyHeld()
+    {
+        // An upgrade that loses history would be worse than the missing column.
+        using var db = new TempDatabase();
+        using (var sink = new SqliteScanSink(db.Path))
+        {
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnFile(FileObject("a.jpg"), "/P/a.jpg", FileKind.MediaFile, recovered: false);
+            sink.OnScanFinished(CleanOutcome() with { MediaFiles = 1, TotalFilesSeen = 1 });
+        }
+        using (var c = db.Open())
+        {
+            using var reset = c.CreateCommand();
+            reset.CommandText = "PRAGMA user_version = 0;";
+            reset.ExecuteNonQuery();
+        }
+
+        using (var sink = new SqliteScanSink(db.Path))
+        {
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnScanFinished(CleanOutcome());
+        }
+
+        Assert.Equal(2, db.Count("scan"));
+        Assert.Equal(1, db.Count("file"));
+    }
+
+    [Fact]
+    public void ADatabaseFromANewerBuild_IsRefusedRatherThanWrittenHalfBlind()
+    {
+        // The case that can actually corrupt someone's data. An older build
+        // cannot know which columns it is failing to fill, and a scan written
+        // with silent gaps is worse than one not written at all.
+        using var db = new TempDatabase();
+        using (var sink = new SqliteScanSink(db.Path))
+        {
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnScanFinished(CleanOutcome());
+        }
+        using (var c = db.Open())
+        {
+            using var bump = c.CreateCommand();
+            bump.CommandText = "PRAGMA user_version = " + (SqliteScanSink.SchemaVersion + 1) + ";";
+            bump.ExecuteNonQuery();
+        }
+
+        var ex = Assert.Throws<InvalidOperationException>(() => new SqliteScanSink(db.Path));
+        Assert.Contains("daha yeni", ex.Message);
+    }
+
+    [Fact]
+    public void OpeningTheSameDatabaseRepeatedly_DoesNotReapplyTheUpgrade()
+    {
+        // ALTER TABLE throws on a repeat, so the second open would fail if the
+        // migration did not check first.
+        using var db = new TempDatabase();
+        for (int i = 0; i < 4; i++)
+        {
+            using var sink = new SqliteScanSink(db.Path);
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnScanFinished(CleanOutcome());
+        }
+
+        Assert.Equal(4, db.Count("scan"));
+        Assert.Equal(SqliteScanSink.SchemaVersion, ReadUserVersion(db));
+    }
+
+    [Fact]
+    public void UnresolvedObjects_ReachesTheScanRow()
+    {
+        // The reason this column exists: a scan marked partial for this had no
+        // way to say so, and an unexplained "incomplete" warning is one a user
+        // learns to ignore.
+        using var db = new TempDatabase();
+        using (var sink = new SqliteScanSink(db.Path))
+        {
+            sink.OnScanStarted(Device(), cameraMode: false);
+            sink.OnScanFinished(CleanOutcome() with { UnresolvedObjects = 21 });
+        }
+
+        Assert.Equal(1, db.Count("scan", "unresolved_objects = 21 AND status = 'partial'"));
+    }
 }

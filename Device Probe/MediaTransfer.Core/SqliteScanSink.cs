@@ -144,13 +144,73 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
             Run("PRAGMA journal_mode=WAL;");
             Run("PRAGMA synchronous=NORMAL;");
             Run("PRAGMA foreign_keys=ON;");
-            Run(Schema);
+            Migrate();
         }
         catch
         {
             connection.Dispose();
             throw;
         }
+    }
+
+    /// <summary>
+    /// What this build knows how to write. Stored in the file's own header, so
+    /// a database carries its shape with it.
+    /// </summary>
+    public const int SchemaVersion = 2;
+
+    /// <summary>
+    /// Brings the file up to <see cref="SchemaVersion"/>, or refuses it.
+    ///
+    /// CREATE TABLE IF NOT EXISTS silently does nothing to a database that
+    /// already has the table, so adding a column to the schema text would leave
+    /// every existing file on the old shape and then fail at INSERT time on a
+    /// user's machine. No test would catch it either, because tests open fresh
+    /// files. That is what this replaces.
+    ///
+    /// The refusal matters more than the upgrade. An older build opening a
+    /// newer database cannot know which columns it is failing to fill, and a
+    /// scan written half-blind is worse than one not written at all.
+    /// </summary>
+    void Migrate()
+    {
+        long version = UserVersion();
+        if (version > SchemaVersion)
+        {
+            throw new InvalidOperationException(
+                $"Bu veritabanı daha yeni bir sürümle yazılmış (şema {version}, bu sürüm {SchemaVersion}). " +
+                "Eski bir sürümle yazmak, dolduramadığı alanları sessizce boş bırakır.");
+        }
+
+        // Version 0 is both a brand new file and every file written before
+        // versioning existed. IF NOT EXISTS makes running the schema safe for
+        // both.
+        if (version == 0) Run(Schema);
+
+        // 1 -> 2: unresolved_objects. Added because a scan marked partial for
+        // that reason had no way to say so, and an unexplained "incomplete"
+        // warning is one a user learns to ignore.
+        if (version < 2) AddColumn("scan", "unresolved_objects", "INTEGER");
+
+        Run($"PRAGMA user_version = {SchemaVersion};");
+    }
+
+    long UserVersion()
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA user_version;";
+        return command.ExecuteScalar() is long v ? v : 0;
+    }
+
+    /// <summary>Adds a column unless it is already there - ALTER TABLE throws on a repeat.</summary>
+    void AddColumn(string table, string column, string type)
+    {
+        using var check = connection.CreateCommand();
+        check.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = $c;";
+        check.Parameters.AddWithValue("$c", column);
+        if (Convert.ToInt64(check.ExecuteScalar() ?? 0L) > 0) return;
+
+        Run($"ALTER TABLE {table} ADD COLUMN {column} {type};");
     }
 
     void Run(string sql)
@@ -196,6 +256,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
             signature_checks_run INTEGER, caught_by_signature_only INTEGER,
             signature_check_errors INTEGER, files_skipped_by_breaker INTEGER,
             signature_checking_disabled INTEGER, file_property_misses INTEGER,
+            unresolved_objects INTEGER,
             retry_ran INTEGER, retry_skip_reason TEXT, retry_attempted INTEGER,
             recovered_files INTEGER, recovered_folders INTEGER,
             still_unreadable INTEGER, hidden_subtrees INTEGER, retry_new_failures INTEGER
@@ -246,12 +307,6 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         -- a hypothetical. Finding A6; it also fixes the localized-storage-name
         -- problem, where changing the phone's language renames every path.
         --
-        -- MISSING: PRAGMA user_version. CREATE TABLE IF NOT EXISTS silently
-        -- does nothing to an existing database, so adding a column here would
-        -- leave older files on the old schema and then fail at INSERT time on
-        -- a user's machine. No test can catch it - every test opens a fresh
-        -- file. Finding E1, and the one item whose cost grows while it waits.
-
         CREATE INDEX IF NOT EXISTS ix_file_scan_path ON file(scan_id, path);
         CREATE INDEX IF NOT EXISTS ix_file_scan_kind ON file(scan_id, kind);
         CREATE INDEX IF NOT EXISTS ix_folder_scan_path ON folder(scan_id, path);
@@ -475,7 +530,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
                 completed = $completed, stalled = $stalled, faulted = $faulted,
                 media_files = $media, documents = $documents,
                 undetermined_files = $undetermined, total_files_seen = $total,
-                subtree_losses = $losses,
+                subtree_losses = $losses, unresolved_objects = $unresolved,
                 signature_checks_run = $sigRun, caught_by_signature_only = $sigOnly,
                 signature_check_errors = $sigErrors, files_skipped_by_breaker = $breakerSkips,
                 signature_checking_disabled = $breakerTripped, file_property_misses = $propMisses,
@@ -500,6 +555,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         update.Parameters.AddWithValue("$undetermined", outcome.UndeterminedFiles);
         update.Parameters.AddWithValue("$total", outcome.TotalFilesSeen);
         update.Parameters.AddWithValue("$losses", outcome.SubtreeLosses);
+        update.Parameters.AddWithValue("$unresolved", outcome.UnresolvedObjects);
         update.Parameters.AddWithValue("$sigRun", outcome.SignatureChecksRun);
         update.Parameters.AddWithValue("$sigOnly", outcome.CaughtBySignatureOnly);
         update.Parameters.AddWithValue("$sigErrors", outcome.SignatureCheckErrors);

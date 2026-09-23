@@ -14,6 +14,23 @@
   var host = window.chrome && window.chrome.webview;
   var D = null;
 
+  // A script error here leaves the window showing whatever it last drew, with
+  // no console anyone will open. Reporting it to the host puts it in the log
+  // next to the database, which is the only place a frozen screen can be
+  // explained after the fact.
+  window.addEventListener("error", function (ev) {
+    if (host) {
+      host.postMessage({
+        cmd: "log",
+        text: "sayfa hatasi: " + (ev.message || "") + " @ " +
+              (ev.filename || "") + ":" + (ev.lineno || 0)
+      });
+    }
+  });
+  window.addEventListener("unhandledrejection", function (ev) {
+    if (host) host.postMessage({ cmd: "log", text: "sayfa reddi: " + ev.reason });
+  });
+
   var COLS = [
     { key: "n", label: "Ad",    dir: 1,  cls: "" },
     { key: "t", label: "Tür",   dir: 1,  cls: "r c-type" },
@@ -92,6 +109,9 @@
             fmtInt(m.files) + " dosya, " + fmtInt(m.folders) + " klasör bulundu.");
         }
       }
+      else if (m.type === "progressLost") {
+        setStrip("", "İlerleme okunamıyor.", m.message);
+      }
       else if (m.type === "scanEnded") {
         state.scanning = false;
         rescan.disabled = false;
@@ -127,11 +147,16 @@
     scan = D.scans.filter(function (s) { return s.scan_id === D.scanId; })[0] || D.scans[0];
     complete = scan.status === "complete";
 
+    // Yedi alan, cunku guven karari yedi alana bakiyor. Dordune bakmak,
+    // "Eksik sayim" deyip sebebini soylememek demekti.
     reasons = [];
     if (!scan.completed) reasons.push("yürüyüş sona ulaşmadı");
     if (scan.stalled) reasons.push("cihaz cevap vermeyi kesti");
+    if (scan.faulted) reasons.push("tarama bir hatayla durdu");
+    if (scan.camera_mode) reasons.push("telefon görüntü aktarımı modundaydı, video ve belgeler gizliydi");
     if (scan.subtree_losses > 0) reasons.push(scan.subtree_losses + " klasör listelenemedi");
-    if (scan.still_unreadable > 0) reasons.push(scan.still_unreadable + " nesne tanımlanamadı");
+    if (scan.unresolved_objects > 0) reasons.push(scan.unresolved_objects + " nesne tanımlanamadı");
+    if (scan.undetermined_files > 0) reasons.push(scan.undetermined_files + " dosyanın türü belirlenemedi");
 
     var dl = document.getElementById("deviceLabel");
     dl.innerHTML = "";
@@ -143,8 +168,11 @@
 
     if (!state.scanning) {
       if (!complete) {
-        setStrip("", "Eksik sayım.",
-          reasons.join(", ") + ". Eksik dosyalar silinmiş sayılmamalı.");
+        // Sebepsiz bir eksiklik uyarisi, kullanicinin gormezden gelmeyi
+        // ogrenecegi turden bir uyaridir. Sebebi bilmiyorsak onu soyluyoruz.
+        setStrip("", "Eksik sayım.", reasons.length
+          ? reasons.join(", ") + ". Eksik dosyalar silinmiş sayılmamalı."
+          : "Sebebi bu kayıtta yok. Yine de eksik dosyalar silinmiş sayılmamalı.");
       } else {
         strip.hidden = true;
       }
