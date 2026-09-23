@@ -1,0 +1,381 @@
+/* The page's half of the bridge.
+ *
+ * Two things only the host process can do: start the scanner, and read the
+ * database it writes. Everything else happens here. Messages are plain JSON in
+ * both directions - no host objects are exposed to the page, so a bug in this
+ * file cannot reach the filesystem.
+ *
+ * Page to host:  { cmd: "load" }  |  { cmd: "scan" }
+ * Host to page:  data | empty | error | scanStarted | progress | scanEnded
+ */
+(function () {
+  "use strict";
+
+  var host = window.chrome && window.chrome.webview;
+  var D = null;
+
+  var COLS = [
+    { key: "n", label: "Ad",    dir: 1,  cls: "" },
+    { key: "t", label: "Tür",   dir: 1,  cls: "r c-type" },
+    { key: "s", label: "Boyut", dir: -1, cls: "r" },
+    { key: "d", label: "Tarih", dir: -1, cls: "r c-date" }
+  ];
+  var MAX = 500;
+  var state = { tab: "all", sort: "d", dir: -1, scanning: false };
+
+  var strip = document.getElementById("strip");
+  var tabs = document.getElementById("tabs");
+  var content = document.getElementById("content");
+  var statusbar = document.getElementById("statusbar");
+  var rescan = document.getElementById("rescan");
+
+  /* ---------------- helpers ---------------- */
+
+  function fmtInt(n) { return (n || 0).toLocaleString("tr-TR"); }
+  function fmtBytes(b) {
+    if (!b) return "";
+    var u = ["B", "KB", "MB", "GB"], i = 0, v = b;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)) + " " + u[i];
+  }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function ext(name) {
+    var i = name.lastIndexOf(".");
+    return i < 0 ? "" : name.slice(i + 1).toLowerCase();
+  }
+  var PHOTO = { jpg:1, jpeg:1, png:1, heic:1, heif:1, webp:1, gif:1, bmp:1, tif:1, tiff:1, dng:1, jxl:1 };
+  var VIDEO = { mp4:1, mov:1, mkv:1, webm:1, "3gp":1, avi:1, m4v:1 };
+  function tur(f) {
+    if (f.k === "Document") return "Belge";
+    var e = ext(f.n);
+    if (PHOTO[e]) return "Fotoğraf";
+    if (VIDEO[e]) return "Video";
+    return "Dosya";
+  }
+  function fmtDate(d) { return (d || "").replace(/[/-]/g, "."); }
+
+  function setStrip(kind, bold, rest) {
+    strip.hidden = false;
+    strip.className = "strip" + (kind ? " " + kind : "");
+    strip.innerHTML = "";
+    if (bold) strip.appendChild(el("b", null, bold));
+    if (rest) strip.appendChild(el("span", null, rest));
+  }
+
+  /* ---------------- host messages ---------------- */
+
+  function send(msg) {
+    if (host) host.postMessage(msg);
+  }
+
+  if (host) {
+    host.addEventListener("message", function (e) {
+      var m = e.data;
+      if (!m || !m.type) return;
+
+      if (m.type === "data") { D = m.payload; boot(); }
+      else if (m.type === "empty") { showNotice(m.message, true); }
+      else if (m.type === "error") { showNotice(m.message, false); }
+      else if (m.type === "scanStarted") {
+        state.scanning = true;
+        rescan.disabled = true;
+        setStrip("info", "Taranıyor.", "Telefon okunuyor, bu birkaç dakika sürebilir.");
+      }
+      else if (m.type === "progress") {
+        if (state.scanning) {
+          setStrip("info", "Taranıyor.",
+            fmtInt(m.files) + " dosya, " + fmtInt(m.folders) + " klasör bulundu.");
+        }
+      }
+      else if (m.type === "scanEnded") {
+        state.scanning = false;
+        rescan.disabled = false;
+        if (m.crashed) setStrip("", "Tarama yarıda kaldı.", m.message);
+      }
+    });
+  }
+
+  rescan.addEventListener("click", function () {
+    if (state.scanning) return;
+    if (!host) {
+      setStrip("", "Tarama bu sayfada çalışmaz.",
+        "Telefonu USB üzerinden okumak masaüstü uygulamasının işi.");
+      return;
+    }
+    send({ cmd: "scan" });
+  });
+
+  function showNotice(message, offerScan) {
+    tabs.innerHTML = "";
+    content.innerHTML = "";
+    statusbar.innerHTML = "";
+    setStrip("info", null, message);
+    var p = el("p", "empty", offerScan ? "Taramak için yukarıdaki düğmeyi kullanın." : "");
+    content.appendChild(p);
+  }
+
+  /* ---------------- boot with data ---------------- */
+
+  var scan, complete, reasons;
+
+  function boot() {
+    scan = D.scans.filter(function (s) { return s.scan_id === D.scanId; })[0] || D.scans[0];
+    complete = scan.status === "complete";
+
+    reasons = [];
+    if (!scan.completed) reasons.push("yürüyüş sona ulaşmadı");
+    if (scan.stalled) reasons.push("cihaz cevap vermeyi kesti");
+    if (scan.subtree_losses > 0) reasons.push(scan.subtree_losses + " klasör listelenemedi");
+    if (scan.still_unreadable > 0) reasons.push(scan.still_unreadable + " nesne tanımlanamadı");
+
+    var dl = document.getElementById("deviceLabel");
+    dl.innerHTML = "";
+    if (D.device) {
+      dl.appendChild(el("b", null, D.device.friendly_name || ""));
+      dl.appendChild(document.createTextNode("  " +
+        (D.device.manufacturer || "") + " " + (D.device.model || "")));
+    }
+
+    if (!state.scanning) {
+      if (!complete) {
+        setStrip("", "Eksik sayım.",
+          reasons.join(", ") + ". Eksik dosyalar silinmiş sayılmamalı.");
+      } else {
+        strip.hidden = true;
+      }
+    }
+
+    buildTabs();
+    render();
+  }
+
+  function tabOrder() {
+    var apps = Object.keys(D.agg).filter(function (k) { return k.indexOf("app:") === 0; });
+    apps.sort(function (a, b) { return D.agg[b].media - D.agg[a].media; });
+    return ["camera", "screenshot"].concat(apps, ["download", "other"])
+      .filter(function (k) { return D.agg[k]; });
+  }
+
+  function buildTabs() {
+    tabs.innerHTML = "";
+    var ids = ["all"].concat(tabOrder());
+    if (ids.indexOf(state.tab) < 0 && state.tab !== "scan") state.tab = "all";
+
+    function addTab(id, label, trailing) {
+      var b = el("button", "tab" + (trailing ? " trailing" : ""), label);
+      b.type = "button";
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", String(state.tab === id));
+      b.addEventListener("click", function () {
+        state.tab = id;
+        Array.prototype.forEach.call(tabs.children, function (t) {
+          t.setAttribute("aria-selected", String(t === b));
+        });
+        render();
+      });
+      tabs.appendChild(b);
+    }
+
+    addTab("all", "Tümü", false);
+    tabOrder().forEach(function (k) { addTab(k, D.labels[k] || k, false); });
+    addTab("scan", "Tarama", true);
+  }
+
+  /* ---------------- list ---------------- */
+
+  function filesFor(tab) {
+    return D.files.filter(function (f) { return tab === "all" || f.src === tab; });
+  }
+
+  function sortValue(f, key) {
+    if (key === "n") return f.n.toLocaleLowerCase("tr");
+    if (key === "t") return tur(f);
+    if (key === "s") return f.s || 0;
+    return f.d || "";
+  }
+
+  function renderList() {
+    var list = filesFor(state.tab).slice();
+    list.sort(function (a, b) {
+      var x = sortValue(a, state.sort), y = sortValue(b, state.sort);
+      if (x === y) return a.n.localeCompare(b.n, "tr");
+      if (typeof x === "number") return (x - y) * state.dir;
+      return x.localeCompare(y, "tr") * state.dir;
+    });
+
+    var cols = el("div", "cols");
+    COLS.forEach(function (c) {
+      var b = el("button", "colbtn " + c.cls);
+      b.type = "button";
+      var active = state.sort === c.key;
+      b.setAttribute("aria-sort", active ? (state.dir === 1 ? "ascending" : "descending") : "none");
+      b.appendChild(document.createTextNode(c.label));
+      var arrow = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      arrow.setAttribute("class", "arrow");
+      arrow.setAttribute("viewBox", "0 0 8 8");
+      arrow.innerHTML = state.dir === 1
+        ? '<path d="M1 5.5L4 2.5 7 5.5" fill="none" stroke="currentColor" stroke-width="1.4"/>'
+        : '<path d="M1 2.5L4 5.5 7 2.5" fill="none" stroke="currentColor" stroke-width="1.4"/>';
+      b.appendChild(arrow);
+      b.addEventListener("click", function () {
+        if (state.sort === c.key) state.dir = -state.dir;
+        else { state.sort = c.key; state.dir = c.dir; }
+        render();
+      });
+      cols.appendChild(b);
+    });
+    content.appendChild(cols);
+
+    if (!list.length) {
+      content.appendChild(el("p", "empty", "Bu bölümde dosya yok."));
+      return;
+    }
+
+    list.slice(0, MAX).forEach(function (f) {
+      var r = el("div", "row");
+      var nm = el("span", "nm");
+      nm.appendChild(document.createTextNode(f.n));
+      if (state.tab === "all") {
+        nm.appendChild(document.createTextNode("  "));
+        nm.appendChild(el("span", "src", D.labels[f.src] || ""));
+      }
+      r.appendChild(nm);
+      r.appendChild(el("span", "meta r c-type", tur(f)));
+      r.appendChild(el("span", "meta r num", fmtBytes(f.s)));
+      r.appendChild(el("span", "meta r num c-date", fmtDate(f.d)));
+      content.appendChild(r);
+    });
+
+    if (list.length > MAX) {
+      content.appendChild(el("p", "more",
+        fmtInt(MAX) + " satır gösteriliyor. Durum çubuğundaki sayılar taramanın tamamını yansıtır."));
+    }
+  }
+
+  /* ---------------- scan tab ---------------- */
+
+  function card(title) {
+    var c = el("div", "card");
+    c.appendChild(el("h2", null, title));
+    return c;
+  }
+
+  function renderScanTab() {
+    var pad = el("div", "pad");
+    var panels = el("div", "panels");
+
+    var c1 = card("Son tarama");
+    var dlist = el("dl", null);
+    [["Durum", complete ? "Tam sayım" : "Eksik sayım"],
+     ["Medya", fmtInt(scan.media_files)],
+     ["Belge", fmtInt(scan.documents)],
+     ["Görülen dosya", fmtInt(scan.total_files_seen)],
+     ["İmza kontrolü", fmtInt(scan.signature_checks_run)],
+     ["Başlangıç", (scan.started_utc || "").slice(0, 16).replace(/-/g, ".")]
+    ].forEach(function (p) {
+      var d = el("div", "kv");
+      d.appendChild(el("dt", null, p[0]));
+      d.appendChild(el("dd", null, p[1]));
+      dlist.appendChild(d);
+    });
+    c1.appendChild(dlist);
+    if (reasons.length) {
+      var ul = el("ul", "reasons");
+      reasons.forEach(function (r) { ul.appendChild(el("li", null, r)); });
+      c1.appendChild(ul);
+    }
+    panels.appendChild(c1);
+
+    var c2 = card("Geçmiş");
+    var t = document.createElement("table");
+    t.innerHTML = "<thead><tr><th>Tarama</th><th>Durum</th><th class='r'>Medya</th><th class='r'>Görülen</th></tr></thead>";
+    var tb = document.createElement("tbody");
+    D.scans.slice(0, 10).forEach(function (s) {
+      var tr = document.createElement("tr");
+      var a = document.createElement("td");
+      a.className = "num";
+      a.textContent = (s.started_utc || "").slice(5, 16).replace(/-/g, ".");
+      tr.appendChild(a);
+      var b = document.createElement("td");
+      var ok = s.status === "complete";
+      var running = s.status === "running";
+      b.appendChild(el("span", "dot " + (ok ? "ok" : "warn")));
+      b.appendChild(document.createTextNode(ok ? "tam" : running ? "yarıda" : "eksik"));
+      tr.appendChild(b);
+      var c = document.createElement("td"); c.className = "r num"; c.textContent = fmtInt(s.media_files); tr.appendChild(c);
+      var d = document.createElement("td"); d.className = "r num"; d.textContent = fmtInt(s.total_files_seen); tr.appendChild(d);
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb);
+    c2.appendChild(t);
+    panels.appendChild(c2);
+
+    var c3 = card("Taranmayan klasörler");
+    var ul2 = el("ul", "skips");
+    (D.skipped || []).forEach(function (s) {
+      var li = document.createElement("li");
+      var code = document.createElement("code");
+      code.textContent = s.path;
+      li.appendChild(code);
+      li.appendChild(el("span", "sub", s.reason));
+      ul2.appendChild(li);
+    });
+    c3.appendChild(ul2);
+    panels.appendChild(c3);
+
+    pad.appendChild(panels);
+    content.appendChild(pad);
+  }
+
+  /* ---------------- frame ---------------- */
+
+  function render() {
+    content.innerHTML = "";
+    if (state.tab === "scan") renderScanTab();
+    else renderList();
+    renderStatus();
+  }
+
+  function renderStatus() {
+    statusbar.innerHTML = "";
+
+    var totalFiles = 0, totalBytes = 0;
+    Object.keys(D.agg).forEach(function (k) {
+      totalFiles += D.agg[k].media + D.agg[k].doc;
+      totalBytes += D.agg[k].bytes;
+    });
+
+    if (state.tab === "scan") {
+      statusbar.appendChild(el("span", null, fmtInt(D.scans.length) + " tarama kayıtlı"));
+    } else if (state.tab === "all") {
+      var h = el("span");
+      h.appendChild(el("b", "num", fmtInt(totalFiles)));
+      h.appendChild(document.createTextNode(" dosya, " + fmtBytes(totalBytes)));
+      statusbar.appendChild(h);
+    } else {
+      var a = D.agg[state.tab] || { media: 0, doc: 0, bytes: 0 };
+      var here = el("span");
+      here.appendChild(el("b", "num", fmtInt(a.media + a.doc)));
+      here.appendChild(document.createTextNode(" dosya, " + fmtBytes(a.bytes)));
+      statusbar.appendChild(here);
+      statusbar.appendChild(el("span", null,
+        "Toplam " + fmtInt(totalFiles) + " dosya, " + fmtBytes(totalBytes)));
+    }
+
+    var v = el("span", "verdict push " + (complete ? "ok" : "warn"));
+    v.appendChild(el("span", "dot " + (complete ? "ok" : "warn")));
+    v.appendChild(document.createTextNode(complete ? "Tam sayım" : "Eksik sayım"));
+    statusbar.appendChild(v);
+  }
+
+  /* ---------------- start ---------------- */
+
+  setStrip("info", null, "Kayıtlar okunuyor.");
+  if (host) send({ cmd: "load" });
+  else showNotice("Bu sayfa masaüstü uygulamasının içinde çalışır.", false);
+})();

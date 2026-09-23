@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <!-- No COM reference here, deliberately, and that is what keeps this project
+       buildable with `dotnet build`. The scanner's WPD interop lives in the
+       Device Probe executable, which this app STARTS rather than links to.
+
+       That separation is not tidiness. The scanner calls Environment.FailFast
+       when a device wedges past recovery - measured, and the only safe answer
+       when a COM call will never return. In one process that would take the
+       window down with it. As a child process it cannot: the app survives,
+       notices the exit code, and can say what happened. -->
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3485.44" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MediaTransfer.Core\MediaTransfer.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="wwwroot\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

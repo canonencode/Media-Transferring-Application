@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telefon Medya Envanteri</title>
+<style>
+  /* Tek görsel dünyaya bağlı: füme. Tema geçişi sonraya bırakıldı, o yüzden
+     medya sorgusu yok ama her renk açıkça boyanıyor.
+
+     Renk yalnızca güven durumu için var. Seçili sekme, seçili sütun ve
+     kenarlıklar nötr kalır; ekranda renk gördüysen o tam/eksik sayimla
+     ilgilidir. */
+  :root {
+    --bg:       #2a2a2d;
+    --surface:  #34343a;
+    --surface-2:#2f2f34;
+    --raised:   #3c3c43;
+    --ink:      #e8e8ea;
+    --ink-2:    #a9a9b0;
+    --ink-3:    #7c7c84;
+    --line:     #3f3f46;
+    --line-2:   #38383e;
+
+    --trust:    #7cc08d;
+    --doubt:    #d7a44e;
+    --doubt-bg: #3a3123;
+
+    --r:  6px;
+    --r2: 4px;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+    overflow: hidden;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+  h2 { text-wrap: balance; }
+  p { text-wrap: pretty; }
+
+  .app { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+
+  /* ---------- pencere başlığı ---------- */
+  .titlebar {
+    flex: 0 0 auto; height: 34px; display: flex; align-items: center; justify-content: flex-end;
+    padding: env(safe-area-inset-top, 0px) 0 0; -webkit-user-select: none; user-select: none;
+  }
+  .wbtn { width: 44px; height: 34px; display: grid; place-items: center; color: var(--ink-3); }
+  .wbtn svg { width: 10px; height: 10px; }
+
+  /* ---------- komut çubuğu ---------- */
+  .commandbar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+    padding: 0 12px 8px; border-bottom: 1px solid var(--line);
+  }
+  .cmd {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: none; border: 1px solid transparent; border-radius: var(--r2);
+    padding: 6px 10px; font: inherit; color: var(--ink); cursor: pointer;
+  }
+  .cmd:hover { background: var(--raised); }
+  .cmd:active { background: var(--surface-2); }
+  .cmd:disabled { color: var(--ink-3); cursor: default; background: none; }
+  .cmd svg { width: 14px; height: 14px; flex: 0 0 auto; }
+  .device-label { margin-left: auto; font-size: 12px; color: var(--ink-2); padding-right: 4px; }
+  .device-label b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- uyarı şeridi ---------- */
+  .strip {
+    flex: 0 0 auto; display: flex; align-items: baseline; gap: 10px;
+    padding: 8px 14px; font-size: 12px;
+    background: var(--doubt-bg); color: var(--doubt);
+    border-bottom: 1px solid var(--line);
+  }
+  .strip.info { background: var(--surface-2); color: var(--ink-2); }
+  .strip b { font-weight: 600; }
+  .strip span { color: var(--ink-2); }
+
+  /* ---------- sekmeler ---------- */
+  .tabs {
+    flex: 0 0 auto; display: flex; gap: 2px; padding: 6px 10px 0;
+    border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin;
+  }
+  .tab {
+    background: none; border: 0; border-bottom: 2px solid transparent;
+    padding: 7px 12px 8px; font: inherit; font-size: 13px; color: var(--ink-2);
+    cursor: pointer; white-space: nowrap; border-radius: var(--r2) var(--r2) 0 0;
+  }
+  .tab:hover { background: var(--surface-2); color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--ink); }
+  .tab.trailing { margin-left: auto; }
+
+  /* ---------- içerik ---------- */
+  .content { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  .pad { padding: 14px 16px 28px; }
+
+  .cols, .row {
+    display: grid; grid-template-columns: minmax(0,1fr) 108px 96px 108px;
+    gap: 14px; align-items: center;
+  }
+  .cols {
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
+    padding: 4px 16px 5px; border-bottom: 1px solid var(--line);
+  }
+
+  /* Sıralama ölçütü sütun başlığının kendisi. Ayrı bir menü, ekranda zaten
+     yazan bir şeyi ikinci kez sormaktı. */
+  .colbtn {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: none; border: 0; border-radius: var(--r2); padding: 5px 7px;
+    font: inherit; font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--ink-3); cursor: pointer;
+  }
+  .colbtn:hover { background: var(--surface-2); color: var(--ink-2); }
+  .colbtn[aria-sort="none"] .arrow { visibility: hidden; }
+  .colbtn:not([aria-sort="none"]) { color: var(--ink); font-weight: 600; }
+  .colbtn .arrow { width: 8px; height: 8px; }
+  .colbtn.r { justify-self: end; }
+
+  .row { padding: 7px 16px; border-bottom: 1px solid var(--line-2); }
+  .row:hover { background: var(--surface-2); }
+  .row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .meta { color: var(--ink-2); font-size: 12px; }
+  .row .r { text-align: right; }
+  .row .src { color: var(--ink-3); font-size: 11px; }
+
+  .empty { padding: 56px 16px; color: var(--ink-3); text-align: center; }
+  .more { padding: 14px 16px; font-size: 11px; color: var(--ink-3); }
+
+  /* ---------- tarama sekmesi ---------- */
+  .panels { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; }
+  .card h2 {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--ink-3); margin: 0 0 12px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th {
+    text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--ink-3); font-weight: 600; padding: 0 10px 7px 0; border-bottom: 1px solid var(--line);
+  }
+  td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+  td.r, th.r { text-align: right; padding-right: 0; }
+  .sub { display: block; color: var(--ink-3); font-size: 11px; margin-top: 2px; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; }
+  .dot.ok { background: var(--trust); } .dot.warn { background: var(--doubt); }
+
+  .kv { display: flex; justify-content: space-between; gap: 14px; padding: 7px 0; border-bottom: 1px solid var(--line-2); }
+  .kv:last-child { border-bottom: 0; }
+  .kv dt { color: var(--ink-2); }
+  .kv dd { margin: 0; font-weight: 600; }
+
+  .reasons { margin: 0; padding: 0; list-style: none; }
+  .reasons li { padding: 6px 0 6px 16px; position: relative; border-bottom: 1px solid var(--line-2); }
+  .reasons li:last-child { border-bottom: 0; }
+  .reasons li::before { content: ""; position: absolute; left: 0; top: 12px; width: 8px; height: 2px; background: var(--doubt); }
+
+  .skips { margin: 0; padding: 0; list-style: none; }
+  .skips li { padding: 7px 0; border-bottom: 1px solid var(--line-2); }
+  .skips li:last-child { border-bottom: 0; }
+  .skips code { font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px; word-break: break-all; }
+
+  /* ---------- durum çubuğu ---------- */
+  .statusbar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 7px 16px calc(7px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--line); background: var(--surface-2);
+    font-size: 12px; color: var(--ink-2);
+  }
+  .statusbar b { color: var(--ink); font-weight: 600; }
+  .statusbar .verdict { display: inline-flex; align-items: center; }
+  .statusbar .verdict.ok { color: var(--trust); }
+  .statusbar .verdict.warn { color: var(--doubt); }
+  .statusbar .push { margin-left: auto; }
+
+  button:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; border-radius: var(--r2); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+  @media (max-width: 680px) {
+    .cols, .row { grid-template-columns: minmax(0,1fr) 84px; }
+    .c-type, .c-date { display: none; }
+    .device-label { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <div class="titlebar" aria-hidden="true">
+    <span class="wbtn"><svg viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1"/></svg></span>
+    <span class="wbtn"><svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg></span>
+    <span class="wbtn"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1"/></svg></span>
+  </div>
+
+  <div class="commandbar">
+    <button class="cmd" type="button" id="rescan">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+        <path d="M14 8a6 6 0 1 1-1.8-4.3"/><path d="M14 2v4h-4"/>
+      </svg>
+      Yeniden tara
+    </button>
+    <span class="device-label" id="deviceLabel"></span>
+  </div>
+
+  <div class="strip" id="strip" hidden></div>
+
+  <div class="tabs" id="tabs" role="tablist"></div>
+
+  <div class="content" id="content"></div>
+
+  <div class="statusbar" id="statusbar"></div>
+</div>
+
+
+<script src="bridge.js"></script>
+</body>
+</html>
