@@ -146,6 +146,15 @@ public sealed class ScanStore(string databasePath)
         return (files, last);
     }
 
+    /// <summary>The phone's own name, used to suggest a folder to back it up into.</summary>
+    public string? DeviceName()
+    {
+        using var c = Open();
+        using var q = c.CreateCommand();
+        q.CommandText = "SELECT friendly_name FROM device ORDER BY last_seen_utc DESC LIMIT 1;";
+        return q.ExecuteScalar() as string;
+    }
+
     /// <summary>Everything the window needs for one scan, shaped for the page.</summary>
     public string PayloadJson(long scanId)
     {

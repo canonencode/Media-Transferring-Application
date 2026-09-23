@@ -201,6 +201,33 @@ var folderType = new Guid(0x27E2E392, 0xA111, 0x48E0, 0xAB, 0x0C, 0xE1, 0x77, 0x
 // something we need to step into to reach the real folders underneath.
 var functionalObjectType = new Guid(0x99ED0160, 0x17FF, 0x4C44, 0x9D, 0x98, 0x1D, 0x7A, 0x6F, 0x94, 0x19, 0x21);
 
+// Guards CloseSession(), which is reachable from three places at once. An int
+// rather than a bool because Interlocked has no bool overload. Declared up here
+// because the measurement mode below closes the session and returns without
+// ever reaching the scan.
+int sessionClosed = 0;
+
+// --- Measurement mode ----------------------------------------------------
+// Not a feature: a way to answer three questions with numbers instead of
+// guesses, before the copier is designed around any of them.
+//
+//   1. Are stored object ids still valid in a later session? WPD documents
+//      them as NOT stable across sessions, and a copier that trusts them would
+//      work on one device and quietly fail on another.
+//   2. What does opening a stream cost per file? Measured at ~13 ms on this
+//      phone and 278 ms on another, and 13,630 of them is either three minutes
+//      or an hour.
+//   3. What throughput do many small files get? 31.99 MB/s was measured on ONE
+//      large file, which says little about the real mix.
+if (args.Length > 0 && args[0] == "--measure-copy")
+{
+    MeasureCopy(
+        args.Length > 1 && int.TryParse(args[1], out int measureCount) ? measureCount : 40,
+        args.Length > 2 ? args[2] : Path.Combine(Path.GetTempPath(), "mt-measure"));
+    CloseSession();
+    return;
+}
+
 // Both are stored on the scan row now, as signature_checks_run and
 // caught_by_signature_only.
 //
@@ -311,9 +338,6 @@ var failedObjects = new List<(string ObjectId, string Path, ScanStage Stage)>();
 var classifiedObjectIds = new HashSet<string>();  // files already counted
 var walkedContainerIds = new HashSet<string>();   // folders already enumerated; also breaks cycles
 
-// Guards CloseSession(), which is reachable from three places at once. An int
-// rather than a bool because Interlocked has no bool overload.
-int sessionClosed = 0;
 
 // Same guard for the verdict. The watchdog reports just before FailFast, and
 // the main thread reports in its finally; if the scan unwedges in the moments
@@ -1137,6 +1161,125 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
     }
 
     return kind;
+}
+
+// Copies a spread of real files and reports what it cost. Reads them exactly
+// the way the copier will, so the numbers carry over.
+void MeasureCopy(int wanted, string destination)
+{
+    Directory.CreateDirectory(destination);
+    Console.WriteLine($"Measuring {wanted} file copies into {destination}\n");
+
+    var picked = new List<(string ObjectId, string Name, long Size)>();
+    using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+        $"Data Source={SqliteScanSink.DefaultDatabasePath};Mode=ReadOnly;Pooling=False"))
+    {
+        db.Open();
+        using var q = db.CreateCommand();
+        // Spread across the whole scan rather than the first N rows, which
+        // would all come from one folder and measure one corner of the device.
+        // Large files are excluded: this measures per-file cost, and a single
+        // 2 GB video would drown thirty-nine others.
+        q.CommandText = """
+            SELECT object_id, name, size FROM file
+            WHERE scan_id = (SELECT MAX(scan_id) FROM scan WHERE status = 'complete')
+              AND kind = 'MediaFile' AND size > 0 AND size < 104857600
+            ORDER BY file_id;
+            """;
+
+        var all = new List<(string, string, long)>();
+        using var r = q.ExecuteReader();
+        while (r.Read()) all.Add((r.GetString(0), r.GetString(1), r.GetInt64(2)));
+
+        if (all.Count == 0)
+        {
+            Console.WriteLine("No completed scan to measure against. Run a scan first.");
+            return;
+        }
+        int step = Math.Max(1, all.Count / wanted);
+        for (int i = 0; i < all.Count && picked.Count < wanted; i += step) picked.Add(all[i]);
+    }
+
+    long totalBytes = 0, openTicks = 0, readTicks = 0;
+    int failed = 0, copied = 0;
+    var wall = System.Diagnostics.Stopwatch.StartNew();
+    var openClock = new System.Diagnostics.Stopwatch();
+
+    foreach (var (objectId, name, size) in picked)
+    {
+        IStream? wpdStream = null;
+        IntPtr readPtr = IntPtr.Zero;
+        string target = Path.Combine(destination, TransferPlan.SafeFileName(name));
+        try
+        {
+            uint optimal = 0;
+            openClock.Restart();
+            resources.GetStream(objectId, ref resourceDefaultKey, 0 /* STGM_READ */, ref optimal, out wpdStream);
+            openClock.Stop();
+            openTicks += openClock.ElapsedTicks;
+
+            var stream = (System.Runtime.InteropServices.ComTypes.IStream)wpdStream;
+            int buffer = optimal > 0 ? (int)optimal : 262144;
+            byte[] chunk = new byte[buffer];
+            readPtr = System.Runtime.InteropServices.Marshal.AllocHGlobal(sizeof(int));
+
+            var readClock = System.Diagnostics.Stopwatch.StartNew();
+            using (var file = new FileStream(target, FileMode.Create, FileAccess.Write, FileShare.None, buffer))
+            {
+                while (true)
+                {
+                    // Same discipline as the signature check: zero the slot
+                    // first and clamp what comes back, because a driver that
+                    // reports success without writing the count would leave
+                    // whatever happened to be in that memory.
+                    System.Runtime.InteropServices.Marshal.WriteInt32(readPtr, 0);
+                    stream.Read(chunk, chunk.Length, readPtr);
+                    int got = System.Runtime.InteropServices.Marshal.ReadInt32(readPtr);
+                    if (got <= 0) break;
+                    if (got > chunk.Length) got = chunk.Length;
+                    file.Write(chunk, 0, got);
+                    totalBytes += got;
+                }
+            }
+            readClock.Stop();
+            readTicks += readClock.ElapsedTicks;
+            copied++;
+        }
+        catch (System.Runtime.InteropServices.COMException ex)
+        {
+            failed++;
+            if (failed <= 3) Console.WriteLine($"  [FAIL] 0x{ex.HResult:X8}  {name}");
+        }
+        finally
+        {
+            if (readPtr != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(readPtr);
+            if (wpdStream is not null) System.Runtime.InteropServices.Marshal.ReleaseComObject(wpdStream);
+            // Deleted as we go: the measurement must not need the space the
+            // real transfer will, and this machine is short of it.
+            try { File.Delete(target); } catch (IOException) { }
+        }
+    }
+    wall.Stop();
+
+    double ticksPerMs = System.Diagnostics.Stopwatch.Frequency / 1000.0;
+    double openMs = openTicks / ticksPerMs;
+    double readMs = readTicks / ticksPerMs;
+    double mb = totalBytes / 1024.0 / 1024.0;
+    double perFileOpen = openMs / Math.Max(1, picked.Count);
+    double mbPerSecond = mb / Math.Max(0.001, readMs / 1000.0);
+
+    Console.WriteLine($"\nTried {picked.Count} file(s): {copied} copied, {failed} failed.");
+    Console.WriteLine($"Stored object ids valid : {(failed == 0 ? "all of them" : $"{copied} of {picked.Count}")}");
+    Console.WriteLine($"Opening streams         : {openMs:F0} ms total, {perFileOpen:F1} ms per file");
+    Console.WriteLine($"Reading bytes           : {readMs:F0} ms total, {mb:F1} MB, {mbPerSecond:F1} MB/s");
+    Console.WriteLine($"Wall clock              : {wall.Elapsed.TotalSeconds:F1} s");
+
+    double projOpenMin = perFileOpen * 13630 / 1000 / 60;
+    double projReadMin = (22.14 * 1024 / mbPerSecond) / 60;
+    Console.WriteLine($"\nProjected for 13,630 files and 22.14 GB:");
+    Console.WriteLine($"  opening  ~{projOpenMin:F1} min");
+    Console.WriteLine($"  reading  ~{projReadMin:F1} min");
+    Console.WriteLine($"  total    ~{projOpenMin + projReadMin:F1} min");
 }
 
 // Reads the first bytes of an object's content and checks them against known

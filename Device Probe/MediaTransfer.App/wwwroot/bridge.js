@@ -47,6 +47,8 @@
   var content = document.getElementById("content");
   var statusbar = document.getElementById("statusbar");
   var rescan = document.getElementById("rescan");
+  var transferBtn = document.getElementById("transfer");
+  var setup = document.getElementById("setup");
 
   /* ---------------- helpers ---------------- */
 
@@ -104,6 +106,8 @@
         state.scanning = true;
         openLive();
         rescan.disabled = true;
+        transferBtn.disabled = true;
+        closeSetup();
         scanbar.hidden = false;
         scanbar.className = "scanbar unknown";
         setStrip("info", "Taranıyor.", "Telefon okunuyor.");
@@ -111,6 +115,9 @@
       else if (m.type === "progress") {
         if (state.scanning) showProgress(m);
       }
+      else if (m.type === "drives") { renderSetup(m); }
+      else if (m.type === "browsed") { setupState.root = m.path; setupState.custom = true; drawSetup(); askPreflight(); }
+      else if (m.type === "preflight") { showPreflight(m); }
       else if (m.type === "progressLost") {
         setStrip("", "İlerleme okunamıyor.", m.message);
       }
@@ -118,6 +125,7 @@
         state.scanning = false;
         liveRows = null;
         rescan.disabled = false;
+        transferBtn.disabled = false;
         scanbar.hidden = true;
         if (m.crashed) setStrip("", "Tarama yarıda kaldı.", m.message);
       }
@@ -213,6 +221,171 @@
       liveRows.removeChild(liveRows.lastChild);
     }
     if (pinned) content.scrollTop += liveRows.offsetHeight - before;
+  }
+
+  /* ---------------- aktarım kurulumu ---------------- */
+
+  var setupState = { drives: [], root: null, folder: "", group: true, scanId: null, custom: false, pre: null };
+
+  transferBtn.addEventListener("click", function () {
+    if (state.scanning) return;
+    if (!host) return;
+    send({ cmd: "drives" });
+  });
+
+  function openSetup() { setup.hidden = false; content.hidden = true; }
+  function closeSetup() { setup.hidden = true; content.hidden = false; }
+
+  function renderSetup(m) {
+    setupState.drives = m.drives || [];
+    setupState.folder = m.defaultFolder || "Telefon yedek";
+    setupState.scanId = m.scanId;
+    setupState.custom = false;
+    setupState.pre = null;
+
+    // Once bos yeri en cok olan surucu secili gelsin: kullanicinin buraya
+    // gelme sebebi 22 GB'lik bir kopyalama, ve C: cogu makinede en dolu disk.
+    var best = null;
+    setupState.drives.forEach(function (d) {
+      if (d.ready && (!best || d.free > best.free)) best = d;
+    });
+    setupState.root = best ? best.root : null;
+
+    openSetup();
+    drawSetup();
+    askPreflight();
+  }
+
+  function askPreflight() {
+    if (!setupState.root || setupState.scanId == null) return;
+    send({
+      cmd: "preflight",
+      root: setupState.root,
+      folder: setupState.folder,
+      group: setupState.group,
+      scanId: setupState.scanId
+    });
+  }
+
+  function showPreflight(p) { setupState.pre = p; drawSetup(); }
+
+  function tick() {
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 10 10");
+    svg.innerHTML = '<path d="M1 5l2.6 2.6L9 2.2" fill="none" stroke="currentColor" stroke-width="2"/>';
+    return svg;
+  }
+
+  function drawSetup() {
+    setup.innerHTML = "";
+    var box = el("div", "setup");
+
+    var back = el("button", "back", "←  Listeye dön");
+    back.type = "button";
+    back.addEventListener("click", closeSetup);
+    box.appendChild(back);
+
+    box.appendChild(el("h2", null, "Hedef"));
+    setupState.drives.forEach(function (d) {
+      var b = el("button", "drive");
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(!setupState.custom && setupState.root === d.root));
+      if (!d.ready) b.disabled = true;
+      b.appendChild(el("span", "pip"));
+      var nm = el("span", "nm");
+      nm.appendChild(document.createTextNode(d.root));
+      nm.appendChild(el("small", null, d.ready ? (d.label || "Yerel disk") : "Hazır değil"));
+      b.appendChild(nm);
+      b.appendChild(el("span", "sp", d.ready
+        ? fmtBytes(d.free) + " boş / " + fmtBytes(d.total)
+        : ""));
+      b.addEventListener("click", function () {
+        setupState.root = d.root;
+        setupState.custom = false;
+        drawSetup();
+        askPreflight();
+      });
+      box.appendChild(b);
+    });
+
+    var browse = el("button", "ghost", "Başka bir klasör seç...");
+    browse.type = "button";
+    browse.addEventListener("click", function () { send({ cmd: "browse" }); });
+    box.appendChild(browse);
+    if (setupState.custom && setupState.root) {
+      box.appendChild(el("p", "dest", setupState.root));
+    }
+
+    box.appendChild(el("h2", null, "Düzen"));
+    var grp = el("button", "check");
+    grp.type = "button";
+    grp.setAttribute("aria-pressed", String(setupState.group));
+    var gb = el("span", "box");
+    gb.appendChild(tick());
+    grp.appendChild(gb);
+    var gt = el("span", "t");
+    gt.appendChild(document.createTextNode("Tek klasörde topla"));
+    gt.appendChild(el("small", null,
+      "Kapalıyken Kamera, WhatsApp gibi klasörler doğrudan seçilen yere açılır."));
+    grp.appendChild(gt);
+    grp.addEventListener("click", function () {
+      setupState.group = !setupState.group;
+      drawSetup();
+      askPreflight();
+    });
+    box.appendChild(grp);
+
+    if (setupState.group) {
+      var field = el("div", "field");
+      var lab = document.createElement("label");
+      lab.setAttribute("for", "folderName");
+      lab.textContent = "Klasör adı";
+      var inp = document.createElement("input");
+      inp.type = "text";
+      inp.id = "folderName";
+      inp.value = setupState.folder;
+      inp.addEventListener("input", function () { setupState.folder = inp.value; });
+      inp.addEventListener("change", askPreflight);
+      field.appendChild(lab);
+      field.appendChild(inp);
+      box.appendChild(field);
+    }
+
+    var p = setupState.pre;
+    if (p) {
+      var dest = el("p", "dest");
+      dest.appendChild(document.createTextNode("Hedef: "));
+      dest.appendChild(el("b", null, p.destination));
+      box.appendChild(dest);
+
+      var led = el("div", "ledger");
+      function row(a, b, cls) {
+        var r = el("div", "r" + (cls ? " " + cls : ""));
+        r.appendChild(el("span", null, a));
+        r.appendChild(el("span", null, b));
+        led.appendChild(r);
+      }
+      row("Aktarılacak dosya", fmtInt(p.files));
+      if (p.renamed > 0) row("Adı değiştirilecek", fmtInt(p.renamed));
+      row("Gereken yer", fmtBytes(p.required));
+      row("Boş yer", fmtBytes(p.free));
+      row(p.fits ? "Sığıyor" : (p.problem || "Sığmıyor"), "", p.fits ? "total" : "total bad");
+      box.appendChild(led);
+
+      var go = el("button", "go", "Aktarımı başlat");
+      go.type = "button";
+      go.disabled = !p.fits;
+      go.addEventListener("click", function () {
+        setStrip("info", "Kopyalama motoru henüz yok.",
+          "Plan ve kontrol hazır; dosyaları taşıyan kısım bir sonraki adım.");
+        closeSetup();
+      });
+      box.appendChild(go);
+    } else {
+      box.appendChild(el("p", "dest", "Hesaplanıyor..."));
+    }
+
+    setup.appendChild(box);
   }
 
   function showNotice(message, offerScan) {

@@ -16,6 +16,7 @@ public sealed class MainWindow : Form
     readonly WebView2 _web = new() { Dock = DockStyle.Fill };
     readonly ScanStore _store = new(SqliteScanSink.DefaultDatabasePath);
     readonly ScanRunner _runner = new();
+    readonly TransferSetup _setup = new(SqliteScanSink.DefaultDatabasePath);
     // 300 ms rather than 500: the rows are inserted into the list rather than
     // redrawn, so a shorter interval costs a small indexed read and buys an
     // arrival that looks continuous instead of stepped.
@@ -113,6 +114,9 @@ public sealed class MainWindow : Form
             case "load": SendScan(); break;
             case "scan": StartScan(); break;
             case "log": Diagnostics.Write(text); break;
+            case "drives": SendDrives(); break;
+            case "browse": BrowseForFolder(); break;
+            case "preflight": SendPreflight(e.WebMessageAsJson); break;
         }
     }
 
@@ -159,6 +163,84 @@ public sealed class MainWindow : Form
         {
             Diagnostics.Write("tarama baslatilamadi: " + ex.Message);
             Send(new { type = "error", message = ex.Message });
+        }
+    }
+
+    /* ---------------- transfer setup ---------------- */
+
+    void SendDrives()
+    {
+        try
+        {
+            var drives = TransferSetup.Drives().Select(d => new
+            {
+                root = d.Root, label = d.Label, free = d.Free, total = d.Total, ready = d.Ready,
+            });
+
+            string? device = null;
+            long? scanId = _store.Exists() ? _store.LatestFinishedScanId() : null;
+            if (scanId is not null) device = _store.DeviceName();
+
+            Send(new
+            {
+                type = "drives",
+                drives,
+                defaultFolder = TransferSetup.DefaultFolderName(device),
+                scanId,
+            });
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.Write("suruculer okunamadi: " + ex);
+            Send(new { type = "error", message = "Sürücüler okunamadı: " + ex.Message });
+        }
+    }
+
+    void BrowseForFolder()
+    {
+        // Opened by the host, because a page has no way to ask for a folder and
+        // no business knowing the filesystem. The page only ever learns the one
+        // path the user chose.
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "Aktarım klasörünü seçin",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true,
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            Send(new { type = "browsed", path = dialog.SelectedPath });
+        }
+    }
+
+    void SendPreflight(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            string path = root.GetProperty("root").GetString() ?? "";
+            string folder = root.TryGetProperty("folder", out var f) ? f.GetString() ?? "" : "";
+            bool group = !root.TryGetProperty("group", out var g) || g.GetBoolean();
+            long scanId = root.GetProperty("scanId").GetInt64();
+
+            var p = _setup.Check(scanId, path, folder, group);
+            Send(new
+            {
+                type = "preflight",
+                destination = p.Destination,
+                required = p.RequiredBytes,
+                files = p.Files,
+                renamed = p.Renamed,
+                free = p.FreeBytes,
+                fits = p.Fits,
+                problem = p.Problem,
+            });
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.Write("preflight hatasi: " + ex);
+            Send(new { type = "error", message = "Hesaplanamadı: " + ex.Message });
         }
     }
 

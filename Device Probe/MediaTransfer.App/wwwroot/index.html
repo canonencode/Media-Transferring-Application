@@ -181,6 +181,71 @@
   .skips li:last-child { border-bottom: 0; }
   .skips code { font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px; word-break: break-all; }
 
+  /* ---------- aktarım kurulumu ---------- */
+  .setup { padding: 18px 20px 34px; max-width: 720px; }
+  .back {
+    background: none; border: 0; padding: 4px 0; font: inherit; font-size: var(--t, 13px);
+    color: var(--ink-2); cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
+  }
+  .back:hover { color: var(--ink); }
+  .setup h2 {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--ink-3); margin: 22px 0 10px;
+  }
+  .drive {
+    display: grid; grid-template-columns: 14px minmax(0,1fr) auto; align-items: center; gap: 11px;
+    width: 100%; text-align: left; background: none; color: var(--ink); cursor: pointer;
+    border: 1px solid var(--line); border-radius: var(--r2); padding: 10px 12px; font: inherit;
+    margin-bottom: 6px;
+  }
+  .drive:hover { background: var(--surface-2); }
+  .drive[aria-pressed="true"] { border-color: var(--ink-2); background: var(--surface); }
+  .drive .pip { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--ink-3); }
+  .drive[aria-pressed="true"] .pip { border-color: var(--ink); box-shadow: inset 0 0 0 3px var(--ink); }
+  .drive .nm { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drive .nm small { display: block; color: var(--ink-3); font-size: 11px; }
+  .drive .sp { font-size: 12px; color: var(--ink-2); text-align: right; white-space: nowrap; }
+  .drive[disabled] { opacity: .45; cursor: default; }
+
+  .field { display: flex; align-items: center; gap: 10px; margin: 10px 0 0; flex-wrap: wrap; }
+  .field label { font-size: 12px; color: var(--ink-2); }
+  .field input[type=text] {
+    flex: 1 1 260px; min-width: 0; font: inherit; font-size: 13px; color: var(--ink);
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r2); padding: 7px 10px;
+  }
+  .field input[type=text]:focus { border-color: var(--ink-2); outline: none; }
+
+  .check { display: flex; align-items: flex-start; gap: 10px; background: none; border: 0;
+           padding: 8px 0; font: inherit; color: var(--ink); cursor: pointer; text-align: left; }
+  .check .box { flex: 0 0 auto; width: 14px; height: 14px; margin-top: 2px;
+                border: 1.5px solid var(--ink-3); border-radius: 3px; display: grid; place-items: center; color: var(--bg); }
+  .check[aria-pressed="true"] .box { background: var(--ink); border-color: var(--ink); }
+  .check[aria-pressed="true"] .box svg { display: block; }
+  .check .box svg { display: none; width: 9px; height: 9px; }
+  .check .t { font-size: 13px; }
+  .check .t small { display: block; color: var(--ink-3); font-size: 11px; margin-top: 1px; }
+
+  .dest { font-size: 12px; color: var(--ink-2); margin: 12px 0 0; word-break: break-all; }
+  .dest b { color: var(--ink); font-weight: 600; }
+
+  .ledger { margin: 16px 0 0; border-top: 1px solid var(--line); }
+  .ledger .r { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--line-2); }
+  .ledger .r span:last-child { font-variant-numeric: tabular-nums; }
+  .ledger .r.total { border-bottom: 2px solid var(--ink); font-weight: 600; }
+  .ledger .r.total.bad { color: var(--doubt); border-bottom-color: var(--doubt); }
+
+  .go {
+    margin-top: 18px; background: var(--ink); color: var(--bg); border: 0; border-radius: var(--r2);
+    padding: 10px 18px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .go:hover { opacity: .88; }
+  .go:disabled { background: var(--line); color: var(--ink-3); cursor: default; opacity: 1; }
+  .ghost {
+    background: none; color: var(--ink-2); border: 1px solid var(--line); border-radius: var(--r2);
+    padding: 9px 14px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .ghost:hover { color: var(--ink); border-color: var(--ink-2); }
+
   /* ---------- durum çubuğu ---------- */
   .statusbar {
     flex: 0 0 auto; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
@@ -221,6 +286,12 @@
       </svg>
       Yeniden tara
     </button>
+    <button class="cmd" type="button" id="transfer">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 1v9"/><path d="M4.5 6.5L8 10l3.5-3.5"/><path d="M2 12v2h12v-2"/>
+      </svg>
+      Aktar
+    </button>
     <span class="device-label" id="deviceLabel"></span>
   </div>
 
@@ -230,6 +301,7 @@
   <div class="tabs" id="tabs" role="tablist"></div>
 
   <div class="content" id="content"></div>
+  <div class="content" id="setup" hidden></div>
 
   <div class="statusbar" id="statusbar"></div>
 </div>
