@@ -270,4 +270,193 @@ public class TransferPlanTests
         Assert.Equal(items.Length, plan.Copies.Count);
         Assert.Equal(items.Length, Paths(plan).Distinct(StringComparer.OrdinalIgnoreCase).Count());
     }
+
+    // ---- ForSources: picking part of a phone -------------------------------
+
+    static TransferItem[] AMixedPhone() =>
+    [
+        Item("/P/DCIM/Camera/IMG_0001.jpg", 1000),
+        Item("/P/DCIM/Camera/IMG_0002.jpg", 1000),
+        Item("/P/Pictures/Screenshots/shot.png", 500),
+        Item("/P/Android/media/com.whatsapp/WhatsApp/Media/a.jpg", 200),
+        Item("/P/Download/manual.pdf", 300),
+        Item("/P/Music/song.mp3", 400),
+    ];
+
+    [Theory]
+    [InlineData("all")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void NoSelection_KeepsEverything(string? sources)
+    {
+        // A caller that means "nothing" has no reason to be planning a transfer,
+        // so the empty cases read as "unfiltered" rather than as "none".
+        var plan = TransferPlan.Build(AMixedPhone());
+
+        Assert.Equal(plan.Copies.Count, TransferPlan.ForSources(plan.Copies, sources).Count);
+    }
+
+    [Fact]
+    public void OneSource_KeepsOnlyThatSource()
+    {
+        var plan = TransferPlan.Build(AMixedPhone());
+
+        var kept = TransferPlan.ForSources(plan.Copies, MediaSource.Camera);
+
+        Assert.Equal(2, kept.Count);
+        Assert.All(kept, c => Assert.StartsWith("Kamera/", c.RelativePath));
+    }
+
+    [Fact]
+    public void SeveralSources_KeepAllOfThem()
+    {
+        var plan = TransferPlan.Build(AMixedPhone());
+
+        var kept = TransferPlan.ForSources(plan.Copies,
+            $"{MediaSource.Camera},{MediaSource.Download}");
+
+        Assert.Equal(3, kept.Count);
+    }
+
+    [Fact]
+    public void AnAppIsPickedByItsPackage()
+    {
+        var plan = TransferPlan.Build(AMixedPhone());
+
+        var kept = TransferPlan.ForSources(plan.Copies, MediaSource.AppPrefix + "com.whatsapp");
+
+        Assert.Single(kept);
+        Assert.StartsWith("WhatsApp/", kept[0].RelativePath);
+    }
+
+    [Fact]
+    public void AnUnknownSourceKeepsNothing_RatherThanEverything()
+    {
+        // The dangerous failure would be the other way round: a typo in a
+        // selection quietly transferring the whole phone onto a disk chosen for
+        // a fraction of it.
+        var plan = TransferPlan.Build(AMixedPhone());
+
+        Assert.Empty(TransferPlan.ForSources(plan.Copies, "app:com.nosuchapp"));
+    }
+
+    [Fact]
+    public void SpacesAndCasingInTheSelection_DoNotChangeIt()
+    {
+        // It arrives as a command line argument, so it has been through a shell,
+        // a JSON message and a join before it gets here.
+        var plan = TransferPlan.Build(AMixedPhone());
+
+        Assert.Equal(3, TransferPlan.ForSources(plan.Copies, " CAMERA , download ,, ").Count);
+    }
+
+    [Fact]
+    public void FilteringNeverRenamesAFile()
+    {
+        // The whole reason ForSources takes a finished plan. If it renumbered,
+        // transferring the camera alone and then the camera again as part of
+        // everything would produce two copies of each photo under two names.
+        var plan = TransferPlan.Build(AMixedPhone());
+        var whole = plan.Copies.ToDictionary(c => c.Item.DevicePath, c => c.RelativePath);
+
+        foreach (string pick in new[] { MediaSource.Camera, MediaSource.Screenshot, "all" })
+        {
+            foreach (var c in TransferPlan.ForSources(plan.Copies, pick))
+            {
+                Assert.Equal(whole[c.Item.DevicePath], c.RelativePath);
+            }
+        }
+    }
+
+    [Fact]
+    public void ClashingNamesKeepTheirNumbers_WhenTheOtherSourceIsLeftOut()
+    {
+        // Two files that clash INSIDE one folder keep whatever the full plan
+        // gave them, so a selection can never move a photo from "IMG (2).jpg"
+        // back to "IMG.jpg" and land on top of a different one.
+        var items = new[]
+        {
+            Item("/P/DCIM/Camera/a/IMG.jpg", 1000),
+            Item("/P/DCIM/Camera/b/IMG.jpg", 1000),
+            Item("/P/Download/other.pdf", 100),
+        };
+        var plan = TransferPlan.Build(items);
+
+        var kept = TransferPlan.ForSources(plan.Copies, MediaSource.Camera);
+
+        Assert.Equal(2, kept.Count);
+        Assert.Equal(2, kept.Select(c => c.RelativePath).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+    }
+
+    // ---- NextFreeName: clashes against the world outside the plan ----------
+
+    [Fact]
+    public void AFreeNameIsTheOriginalWithATwo_WhenNothingElseIsTaken()
+    {
+        // Numbering starts at 2 because the file keeping the place is the 1.
+        Assert.Equal(
+            Path.Combine(@"D:\out\Kamera", "IMG_0001 (2).jpg"),
+            TransferPlan.NextFreeName(@"D:\out\Kamera\IMG_0001.jpg", _ => false));
+    }
+
+    [Fact]
+    public void ItKeepsCountingPastNamesThatAreAlreadyTaken()
+    {
+        // Three earlier versions of the same photo are a real thing to find in a
+        // folder that has been backed up repeatedly.
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            Path.Combine(@"D:\out", "a (2).jpg"),
+            Path.Combine(@"D:\out", "a (3).jpg"),
+            Path.Combine(@"D:\out", "a (4).jpg"),
+        };
+
+        Assert.Equal(
+            Path.Combine(@"D:\out", "a (5).jpg"),
+            TransferPlan.NextFreeName(@"D:\out\a.jpg", taken.Contains));
+    }
+
+    [Fact]
+    public void TwoFilesAskingInTheSamePass_DoNotBothGetTheSameName()
+    {
+        // The bug this exists to prevent. Both are decided before either is
+        // written, so a check that only asks the disk answers "free" twice and
+        // the second copy lands on top of the first.
+        var claimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        string first = TransferPlan.NextFreeName(@"D:\out\a.jpg", claimed.Contains);
+        claimed.Add(first);
+        string second = TransferPlan.NextFreeName(@"D:\out\a.jpg", claimed.Contains);
+
+        Assert.NotEqual(first, second);
+    }
+
+    [Fact]
+    public void TheExtensionStaysAnExtension()
+    {
+        // "a.jpg (2)" would be a file Windows opens with nothing.
+        string free = TransferPlan.NextFreeName(@"D:\out\holiday.tar.gz", _ => false);
+
+        Assert.Equal(".gz", Path.GetExtension(free));
+        Assert.EndsWith("holiday.tar (2).gz", free);
+    }
+
+    [Fact]
+    public void AFileWithNoExtension_GetsANumberAndNothingElse()
+    {
+        Assert.Equal(
+            Path.Combine(@"D:\out", "README (2)"),
+            TransferPlan.NextFreeName(@"D:\out\README", _ => false));
+    }
+
+    [Fact]
+    public void TheFolderIsNeverChanged()
+    {
+        // A renamed file must not quietly move: the destination folder is the
+        // one thing the plan already decided.
+        string free = TransferPlan.NextFreeName(@"D:\out\WhatsApp\a.jpg", _ => false);
+
+        Assert.Equal(@"D:\out\WhatsApp", Path.GetDirectoryName(free));
+    }
 }

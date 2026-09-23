@@ -147,6 +147,88 @@ public sealed class ScanStore(string databasePath)
     }
 
     /// <summary>The phone's own name, used to suggest a folder to back it up into.</summary>
+    /// <summary>
+    /// The highest copy id in the ledger right now.
+    ///
+    /// Taken before a transfer starts, so everything after it belongs to THIS
+    /// run. Progress has to be scoped that way: the ledger is cumulative by
+    /// design - it is the record of what has ever been taken off this phone -
+    /// so a transfer that reported the ledger's own totals would open showing
+    /// four thousand files already copied.
+    /// </summary>
+    public long LatestCopyId()
+    {
+        using var c = Open();
+        using var q = c.CreateCommand();
+        q.CommandText = "SELECT COALESCE(MAX(copy_id), 0) FROM copy;";
+        return q.ExecuteScalar() is long id ? id : 0;
+    }
+
+    /// <summary>
+    /// What a transfer in flight has moved so far, counting only rows this run
+    /// opened.
+    ///
+    /// Read rather than sent: the copier commits each row as it goes and WAL
+    /// lets this connection see them, the same arrangement the scan progress
+    /// uses. Rows rather than a message channel means the figures survive the
+    /// child dying - whatever it managed is still here to be read.
+    /// </summary>
+    public CopyProgress CopyProgressSince(long afterCopyId)
+    {
+        using var c = Open();
+        using var q = c.CreateCommand();
+        q.CommandText = """
+            SELECT
+              COALESCE(SUM(status = 'done'), 0),
+              COALESCE(SUM(status = 'failed'), 0),
+              COALESCE(SUM(CASE WHEN status = 'done' THEN bytes_copied ELSE 0 END), 0),
+              (SELECT source_name FROM copy WHERE copy_id > $after ORDER BY copy_id DESC LIMIT 1)
+            FROM copy WHERE copy_id > $after;
+            """;
+        q.Parameters.AddWithValue("$after", afterCopyId);
+
+        using var r = q.ExecuteReader();
+        r.Read();
+        return new CopyProgress(
+            Done: r.GetInt32(0),
+            Failed: r.GetInt32(1),
+            Bytes: r.GetInt64(2),
+            CurrentFile: r.IsDBNull(3) ? null : r.GetString(3));
+    }
+
+    /// <summary>
+    /// The names of files this run could not take, with the reason.
+    ///
+    /// Shown rather than summarised into a number. A file that did not make it
+    /// is still on the phone, and "3 failed" tells the person nothing they can
+    /// act on.
+    /// </summary>
+    public List<object> CopyFailuresSince(long afterCopyId, int max)
+    {
+        var rows = new List<object>();
+
+        using var c = Open();
+        using var q = c.CreateCommand();
+        q.CommandText = """
+            SELECT source_name, source_path, error FROM copy
+            WHERE copy_id > $after AND status = 'failed' ORDER BY copy_id LIMIT $max;
+            """;
+        q.Parameters.AddWithValue("$after", afterCopyId);
+        q.Parameters.AddWithValue("$max", max);
+
+        using var r = q.ExecuteReader();
+        while (r.Read())
+        {
+            rows.Add(new
+            {
+                name = r.GetString(0),
+                path = r.GetString(1),
+                error = r.IsDBNull(2) ? "" : r.GetString(2),
+            });
+        }
+        return rows;
+    }
+
     public string? DeviceName()
     {
         using var c = Open();
@@ -272,5 +354,8 @@ public sealed class ScanStore(string databasePath)
 
 /// <param name="Expected">Files the last complete scan of this device saw, or null on a first scan.</param>
 /// <param name="CurrentFolder">The most recent folder the walk entered.</param>
+/// <param name="CurrentFile">The most recent file the copier touched, finished or not.</param>
+public readonly record struct CopyProgress(int Done, int Failed, long Bytes, string? CurrentFile);
+
 public readonly record struct ScanProgress(
     long ScanId, int Files, int Folders, string? CurrentFolder, int? Expected, double ElapsedSeconds);

@@ -111,6 +111,63 @@ public static class TransferPlan
     }
 
     /// <summary>
+    /// The planned copies a source selection keeps.
+    ///
+    /// Filtering happens HERE, after a plan has been built over the whole scan,
+    /// and never by dropping files before Build sees them. Planning over a
+    /// subset would hand a file a different name depending on which groups were
+    /// ticked - two files clash, one of them gets " (2)", and which one it lands
+    /// on changes with the selection. A second transfer with a different
+    /// selection would then copy the same file again under the new name, which
+    /// is the folder full of duplicates this project exists to avoid.
+    ///
+    /// It is also the reason this lives in Core rather than in either caller.
+    /// The setup page measures free space against a selection and the copier
+    /// then transfers one; if those two ever disagreed about what a selection
+    /// means, the page would promise a figure the transfer does not honour.
+    /// </summary>
+    /// <param name="sources">
+    /// Comma separated <see cref="MediaSource"/> ids. "all", empty or
+    /// whitespace keeps everything - a caller that means "nothing" has no
+    /// reason to be planning a transfer at all.
+    /// </param>
+    public static IReadOnlyList<PlannedCopy> ForSources(IReadOnlyList<PlannedCopy> copies, string? sources)
+    {
+        if (string.IsNullOrWhiteSpace(sources) || sources.Trim() == "all") return copies;
+
+        var wanted = new HashSet<string>(
+            sources.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()),
+            StringComparer.OrdinalIgnoreCase);
+
+        return [.. copies.Where(c => wanted.Contains(MediaSource.Classify(c.Item.DevicePath).Id))];
+    }
+
+    /// <summary>
+    /// The next unused name for a file whose planned one is already taken.
+    ///
+    /// The sibling of <see cref="Unique"/>, for the other half of the same
+    /// question. Unique settles clashes WITHIN a plan, where the answer is known
+    /// from the plan alone; this settles clashes against the world outside it -
+    /// a file already on disk, or one an earlier file in this same run has
+    /// claimed but not yet written. Both cases have to be asked about, and
+    /// asking only the disk is the bug: two files decided in one pass have
+    /// written nothing yet, so File.Exists would offer both the same name.
+    /// </summary>
+    /// <param name="isTaken">Whatever the caller counts as taken. Called at least once.</param>
+    public static string NextFreeName(string fullPath, Func<string, bool> isTaken)
+    {
+        string folder = Path.GetDirectoryName(fullPath) ?? "";
+        string stem = Path.GetFileNameWithoutExtension(fullPath);
+        string ext = Path.GetExtension(fullPath);
+
+        for (int n = 2; ; n++)
+        {
+            string candidate = Path.Combine(folder, $"{stem} ({n}){ext}");
+            if (!isTaken(candidate)) return candidate;
+        }
+    }
+
+    /// <summary>
     /// A filename Windows will accept, changing as little as possible.
     ///
     /// The device's name is not trusted: MTP hands back whatever the phone

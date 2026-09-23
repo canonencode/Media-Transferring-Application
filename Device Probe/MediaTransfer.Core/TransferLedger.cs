@@ -180,27 +180,50 @@ public sealed class TransferLedger : IDisposable
         return map;
     }
 
-    /// <param name="Unfinished">Rows still saying 'copying' - an interrupted transfer's footprint.</param>
+    /// <param name="Unfinished">Files whose most recent attempt never finished.</param>
     public readonly record struct LedgerCounts(int Done, int Failed, int Unfinished, long Bytes);
 
+    /// <summary>
+    /// What has been taken off a device, counted per FILE rather than per
+    /// attempt.
+    ///
+    /// The distinction is not academic. A run that is killed mid-file leaves a
+    /// 'copying' row that nothing will ever update - the next run opens a new
+    /// row rather than reviving the old one, because a row is the record of one
+    /// attempt and rewriting history would lose the fact that a crash happened.
+    /// Counting rows therefore reported "1 unfinished" for a file that was
+    /// sitting complete on the disk, and went on reporting it after every future
+    /// transfer. Observed, not theorised: a hard kill during the camera copy
+    /// left exactly that, and the run that finished the job still said one file
+    /// was outstanding.
+    ///
+    /// Per-file is also the question actually being asked. Nobody wants to know
+    /// how many attempts were made; they want to know what is on the phone and
+    /// not yet on the PC. That makes this the same rule <see cref="Latest"/> and
+    /// <see cref="AllFor"/> already follow - the newest row for a path is the
+    /// one that speaks for it - applied to the totals.
+    /// </summary>
     public LedgerCounts Counts(string deviceKey)
     {
         using var command = _connection.CreateCommand();
         command.CommandText = """
             SELECT
-              SUM(status = 'done'), SUM(status = 'failed'), SUM(status = 'copying'),
+              COALESCE(SUM(status = 'done'), 0),
+              COALESCE(SUM(status = 'failed'), 0),
+              COALESCE(SUM(status = 'copying'), 0),
               COALESCE(SUM(CASE WHEN status = 'done' THEN bytes_copied ELSE 0 END), 0)
-            FROM copy WHERE device_key = $device;
+            FROM (
+              SELECT status, bytes_copied,
+                     ROW_NUMBER() OVER (PARTITION BY source_path ORDER BY copy_id DESC) AS rn
+              FROM copy WHERE device_key = $device
+            ) WHERE rn = 1;
             """;
         command.Parameters.AddWithValue("$device", deviceKey);
 
         using var reader = command.ExecuteReader();
         reader.Read();
         return new LedgerCounts(
-            reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
-            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-            reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-            reader.GetInt64(3));
+            reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt64(3));
     }
 
     // Invariant, like the scanner's. A local-time string sorts wrongly across a

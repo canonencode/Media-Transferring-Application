@@ -99,6 +99,109 @@ public class TransferLedgerTests
         Assert.Throws<InvalidOperationException>(() => ledger.Complete(999, 10, "hash"));
     }
 
+    [Fact]
+    public void AKilledAttemptStopsCounting_OnceTheFileIsCopied()
+    {
+        // The bug a real hard kill exposed. The run that died left a 'copying'
+        // row; the run that picked the file back up opened a NEW row rather than
+        // reviving it, because a row records one attempt and rewriting history
+        // would lose the fact that a crash happened. Counting rows then reported
+        // one file outstanding while it sat complete on the disk - and would
+        // have gone on reporting it after every future transfer.
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        ledger.Begin(Device, Item("/P/a.jpg"), @"D:\a.jpg");   // killed here
+        long second = ledger.Begin(Device, Item("/P/a.jpg"), @"D:\a.jpg");
+        ledger.Complete(second, 1000, "hash");
+
+        var counts = ledger.Counts(Device);
+        Assert.Equal(1, counts.Done);
+        Assert.Equal(0, counts.Unfinished);
+        Assert.Equal(1000, counts.Bytes);
+    }
+
+    [Fact]
+    public void AFileCopiedTwice_CountsOnce()
+    {
+        // Otherwise "done" drifts above the number of files on the phone, and
+        // the one figure a person checks stops meaning anything.
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        for (int i = 0; i < 3; i++)
+        {
+            long id = ledger.Begin(Device, Item("/P/a.jpg"), @"D:\a.jpg");
+            ledger.Complete(id, 1000, "hash");
+        }
+
+        var counts = ledger.Counts(Device);
+        Assert.Equal(1, counts.Done);
+        Assert.Equal(1000, counts.Bytes);   // not 3000
+    }
+
+    [Fact]
+    public void AFileThatFailedAndThenSucceeded_IsNotStillAFailure()
+    {
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        long first = ledger.Begin(Device, Item("/P/a.jpg"), @"D:\a.jpg");
+        ledger.Fail(first, "0x80070141");
+        long second = ledger.Begin(Device, Item("/P/a.jpg"), @"D:\a.jpg");
+        ledger.Complete(second, 1000, "hash");
+
+        var counts = ledger.Counts(Device);
+        Assert.Equal(1, counts.Done);
+        Assert.Equal(0, counts.Failed);
+    }
+
+    [Fact]
+    public void AFileThatSucceededAndThenFailed_IsAFailure()
+    {
+        // The other direction, and the one that must not be smoothed over: the
+        // phone's file changed, the recopy failed, and what is on disk is no
+        // longer what the phone holds.
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        long first = ledger.Begin(Device, Item("/P/a.jpg"), @"D:\a.jpg");
+        ledger.Complete(first, 1000, "hash");
+        long second = ledger.Begin(Device, Item("/P/a.jpg", size: 2000), @"D:\a.jpg");
+        ledger.Fail(second, "device unreachable");
+
+        var counts = ledger.Counts(Device);
+        Assert.Equal(0, counts.Done);
+        Assert.Equal(1, counts.Failed);
+        Assert.Equal(0, counts.Bytes);
+    }
+
+    [Fact]
+    public void CountsAgreesWithAllFor_FileForFile()
+    {
+        // Both claim to answer "the newest row wins". If they ever disagreed,
+        // the transfer would act on one rule and report against the other.
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        foreach (string p in new[] { "/P/a.jpg", "/P/b.jpg", "/P/c.jpg", "/P/d.jpg" })
+        {
+            long id = ledger.Begin(Device, Item(p), @"D:\x.jpg");
+            if (p == "/P/b.jpg") ledger.Complete(id, 1000, "h");
+            if (p == "/P/c.jpg") ledger.Fail(id, "nope");
+        }
+        long retry = ledger.Begin(Device, Item("/P/c.jpg"), @"D:\x.jpg");
+        ledger.Complete(retry, 500, "h");
+        ledger.Begin(Device, Item("/P/b.jpg"), @"D:\x.jpg");   // reopened, unfinished
+
+        var all = ledger.AllFor(Device);
+        var counts = ledger.Counts(Device);
+
+        Assert.Equal(all.Values.Count(r => r.Status == "done"), counts.Done);
+        Assert.Equal(all.Values.Count(r => r.Status == "failed"), counts.Failed);
+        Assert.Equal(all.Values.Count(r => r.Status == "copying"), counts.Unfinished);
+    }
+
     // ---- Resuming -----------------------------------------------------------
 
     [Fact]

@@ -65,10 +65,22 @@ public sealed class TransferSetup(string databasePath)
     /// including the app data it set aside, while the transfer only carries
     /// media and documents.
     /// </summary>
-    public Preflight Check(long scanId, string root, string? folderName, bool groupInOneFolder)
+    /// <param name="sources">
+    /// Comma separated MediaSource ids, or "all". The figures have to be
+    /// measured against the same selection the copier will be given, or the page
+    /// promises one thing and the transfer does another.
+    /// </param>
+    public Preflight Check(long scanId, string root, string? folderName, bool groupInOneFolder,
+        string sources = "all")
     {
         var items = Items(scanId);
+
+        // Built whole and filtered after, exactly as the copier does it. Planning
+        // over a subset would number a file differently depending on which
+        // groups were ticked, and a second transfer with a different selection
+        // would then copy it again under a new name.
         var plan = TransferPlan.Build(items);
+        var copies = TransferPlan.ForSources(plan.Copies, sources);
 
         string destination = root;
         if (groupInOneFolder && !string.IsNullOrWhiteSpace(folderName))
@@ -89,10 +101,12 @@ public sealed class TransferSetup(string databasePath)
             problem = "Bu konum okunamadı: " + ex.Message;
         }
 
+        long bytes = copies.Sum(c => Math.Max(0, c.Item.Size));
+
         // A margin rather than an exact fit. A filesystem needs room for its own
         // bookkeeping, and a transfer that ends with a full disk leaves the
         // machine in a worse state than one that refuses to start.
-        long needed = plan.TotalBytes + Math.Max(256L * 1024 * 1024, plan.TotalBytes / 50);
+        long needed = bytes + Math.Max(256L * 1024 * 1024, bytes / 50);
         bool fits = problem is null && free >= needed;
 
         if (problem is null && !fits)
@@ -100,8 +114,10 @@ public sealed class TransferSetup(string databasePath)
             problem = "Bu sürücüde yeterli yer yok.";
         }
 
-        return new Preflight(destination, plan.TotalBytes, plan.Copies.Count, plan.Renamed, free, fits, problem);
+        return new Preflight(destination, bytes, copies.Count,
+            copies.Count(c => c.RenamedFrom is not null), free, fits, problem);
     }
+
 
     /// <summary>The files a transfer would carry: media and documents, never the app data.</summary>
     public List<TransferItem> Items(long scanId)

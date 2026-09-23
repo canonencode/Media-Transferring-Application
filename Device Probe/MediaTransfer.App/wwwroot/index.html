@@ -224,6 +224,8 @@
   .check .box svg { display: none; width: 9px; height: 9px; }
   .check .t { font-size: 13px; }
   .check .t small { display: block; color: var(--ink-3); font-size: 11px; margin-top: 1px; }
+  /* Tek tek kaynaklar "Tümü"nün altinda duruyor, cunku onun acilimi. */
+  .check.src-pick { padding-left: 24px; }
 
   .dest { font-size: 12px; color: var(--ink-2); margin: 12px 0 0; word-break: break-all; }
   .dest b { color: var(--ink); font-weight: 600; }
@@ -233,6 +235,13 @@
   .ledger .r span:last-child { font-variant-numeric: tabular-nums; }
   .ledger .r.total { border-bottom: 2px solid var(--ink); font-weight: 600; }
   .ledger .r.total.bad { color: var(--doubt); border-bottom-color: var(--doubt); }
+  /* Bir dosyanin alinamamis olmasi, sayfadaki tek renkli seylerden biri. */
+  .ledger .r.bad { color: var(--doubt); }
+  .ledger .r.bad span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ledger .r.bad span:last-child {
+    font-variant-numeric: normal; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3);
+  }
 
   .go {
     margin-top: 18px; background: var(--ink); color: var(--bg); border: 0; border-radius: var(--r2);

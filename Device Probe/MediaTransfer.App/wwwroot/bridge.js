@@ -38,7 +38,7 @@
     { key: "d", label: "Tarih", dir: -1, cls: "r c-date" }
   ];
   var MAX = 500;
-  var state = { tab: "all", sort: "d", dir: -1, scanning: false };
+  var state = { tab: "all", sort: "d", dir: -1, scanning: false, copying: false };
 
   var strip = document.getElementById("strip");
   var scanbar = document.getElementById("scanbar");
@@ -118,6 +118,26 @@
       else if (m.type === "drives") { renderSetup(m); }
       else if (m.type === "browsed") { setupState.root = m.path; setupState.custom = true; drawSetup(); askPreflight(); }
       else if (m.type === "preflight") { showPreflight(m); }
+      else if (m.type === "transferStarted") {
+        state.copying = true;
+        closeSetup();
+        rescan.disabled = true;
+        transferBtn.disabled = true;
+        scanbar.hidden = false;
+        scanbar.className = "scanbar";
+        scanfill.style.width = "0%";
+        openCopy(m);
+      }
+      else if (m.type === "copyProgress") {
+        if (state.copying) showCopy(m);
+      }
+      else if (m.type === "transferEnded") {
+        state.copying = false;
+        rescan.disabled = false;
+        transferBtn.disabled = false;
+        scanbar.hidden = true;
+        endCopy(m);
+      }
       else if (m.type === "progressLost") {
         setStrip("", "İlerleme okunamıyor.", m.message);
       }
@@ -133,7 +153,7 @@
   }
 
   rescan.addEventListener("click", function () {
-    if (state.scanning) return;
+    if (state.scanning || state.copying) return;
     if (!host) {
       setStrip("", "Tarama bu sayfada çalışmaz.",
         "Telefonu USB üzerinden okumak masaüstü uygulamasının işi.");
@@ -225,10 +245,45 @@
 
   /* ---------------- aktarım kurulumu ---------------- */
 
-  var setupState = { drives: [], root: null, folder: "", group: true, scanId: null, custom: false, pre: null };
+  var setupState = {
+    drives: [], root: null, folder: "", group: true, scanId: null, custom: false, pre: null,
+    // Kaynak kimlikleri. Bos olmasi "hicbiri" demek, "hepsi" degil - gonderirken
+    // ayrimi bozmamak icin asagida acikca "all" yaziliyor.
+    picked: null, groups: []
+  };
+
+  /* Kaynaklar sayfada hesaplaniyor, yeniden sorulmuyor: tarama verisi zaten
+     burada ve her dosyanin kaynagi ile boyutu icinde. Ayni sayiyi bir de
+     veritabanindan sormak, ikisinin ayrisabilecegi ikinci bir yol acardi. */
+  function sourceGroups() {
+    if (!D || !D.files) return [];
+    var by = {};
+    D.files.forEach(function (f) {
+      var g = by[f.src] || (by[f.src] = { id: f.src, n: 0, b: 0 });
+      g.n++;
+      g.b += f.s || 0;
+    });
+    return Object.keys(by).map(function (k) { return by[k]; })
+      .sort(function (a, b) { return b.b - a.b; });
+  }
+
+  /* Uc ayri cevap, ve ucuncusu onemli:
+       null  -> hicbiri secili degil
+       "all" -> hepsi
+       liste -> secilenler
+
+     Bos dizge DONDURULMUYOR. Cekirdekteki ForSources onu "hepsi" olarak
+     okuyor (komut satirinda dogrusu bu), ve hicbir kaynak secmemis birine
+     13.630 dosyanin tamamini teklif etmek, yanlis cevaplarin en kotusu. */
+  function pickedSources() {
+    if (!setupState.picked) return "all";
+    if (setupState.picked.length === 0) return null;
+    if (setupState.picked.length === setupState.groups.length) return "all";
+    return setupState.picked.join(",");
+  }
 
   transferBtn.addEventListener("click", function () {
-    if (state.scanning) return;
+    if (state.scanning || state.copying) return;
     if (!host) return;
     send({ cmd: "drives" });
   });
@@ -242,6 +297,8 @@
     setupState.scanId = m.scanId;
     setupState.custom = false;
     setupState.pre = null;
+    setupState.groups = sourceGroups();
+    setupState.picked = null;
 
     // Once bos yeri en cok olan surucu secili gelsin: kullanicinin buraya
     // gelme sebebi 22 GB'lik bir kopyalama, ve C: cogu makinede en dolu disk.
@@ -258,12 +315,20 @@
 
   function askPreflight() {
     if (!setupState.root || setupState.scanId == null) return;
+
+    // Sorulacak bir sey yok, ve sormamak eski sayilari ekranda birakmasin.
+    if (pickedSources() === null) {
+      setupState.pre = null;
+      return;
+    }
+
     send({
       cmd: "preflight",
       root: setupState.root,
       folder: setupState.folder,
       group: setupState.group,
-      scanId: setupState.scanId
+      scanId: setupState.scanId,
+      sources: pickedSources()
     });
   }
 
@@ -316,6 +381,53 @@
       box.appendChild(el("p", "dest", setupState.root));
     }
 
+    if (setupState.groups.length) {
+      box.appendChild(el("h2", null, "Kaynak"));
+
+      var all = el("button", "check");
+      all.type = "button";
+      all.setAttribute("aria-pressed", String(setupState.picked === null));
+      var ab = el("span", "box");
+      ab.appendChild(tick());
+      all.appendChild(ab);
+      var at = el("span", "t");
+      at.appendChild(document.createTextNode("Tümü"));
+      all.appendChild(at);
+      all.addEventListener("click", function () {
+        setupState.picked = setupState.picked === null ? [] : null;
+        drawSetup();
+        askPreflight();
+      });
+      box.appendChild(all);
+
+      setupState.groups.forEach(function (g) {
+        var on = setupState.picked === null || setupState.picked.indexOf(g.id) >= 0;
+        var b = el("button", "check src-pick");
+        b.type = "button";
+        b.setAttribute("aria-pressed", String(on));
+        var bx = el("span", "box");
+        bx.appendChild(tick());
+        b.appendChild(bx);
+        var t = el("span", "t");
+        t.appendChild(document.createTextNode((D.labels && D.labels[g.id]) || g.id));
+        t.appendChild(el("small", null, fmtInt(g.n) + " dosya  ·  " + fmtBytes(g.b)));
+        b.appendChild(t);
+        b.addEventListener("click", function () {
+          // "Tumu" secilikken tek bir kaynaga dokunmak, onu listeden cikarmak
+          // demek; once acik liste haline getirilip sonra o kaldiriliyor.
+          if (setupState.picked === null) {
+            setupState.picked = setupState.groups.map(function (x) { return x.id; });
+          }
+          var at2 = setupState.picked.indexOf(g.id);
+          if (at2 >= 0) setupState.picked.splice(at2, 1);
+          else setupState.picked.push(g.id);
+          drawSetup();
+          askPreflight();
+        });
+        box.appendChild(b);
+      });
+    }
+
     box.appendChild(el("h2", null, "Düzen"));
     var grp = el("button", "check");
     grp.type = "button";
@@ -352,7 +464,9 @@
     }
 
     var p = setupState.pre;
-    if (p) {
+    if (pickedSources() === null) {
+      box.appendChild(el("p", "dest", "Hiçbir kaynak seçili değil."));
+    } else if (p) {
       var dest = el("p", "dest");
       dest.appendChild(document.createTextNode("Hedef: "));
       dest.appendChild(el("b", null, p.destination));
@@ -374,11 +488,18 @@
 
       var go = el("button", "go", "Aktarımı başlat");
       go.type = "button";
-      go.disabled = !p.fits;
+      go.disabled = !p.fits || p.files === 0;
       go.addEventListener("click", function () {
-        setStrip("info", "Kopyalama motoru henüz yok.",
-          "Plan ve kontrol hazır; dosyaları taşıyan kısım bir sonraki adım.");
-        closeSetup();
+        if (state.copying || state.scanning) return;
+        go.disabled = true;
+        send({
+          cmd: "startTransfer",
+          root: setupState.root,
+          folder: setupState.folder,
+          group: setupState.group,
+          scanId: setupState.scanId,
+          sources: pickedSources()
+        });
       });
       box.appendChild(go);
     } else {
@@ -395,6 +516,110 @@
     setStrip("info", null, message);
     var p = el("p", "empty", offerScan ? "Taramak için yukarıdaki düğmeyi kullanın." : "");
     content.appendChild(p);
+  }
+
+  /* ---------------- aktarım ----------------
+
+     Sayilar cihazdan degil, defterden okunuyor. Kopyalayan surec her dosyayi
+     bitirdiginde bir satir yaziyor ve bu sayfa onlari geriden okuyor; yani
+     ekranda gorunen sey, "su kadar ilerledi" tahmini degil, diske gercekten
+     yazilmis ve dogrulanmis dosya sayisi. Surec olse bile satirlar yerinde
+     kaliyor, o yuzden bitis ozeti de ayni yerden geliyor. */
+
+  var copyTitle = null, copyHead = null, copyNow = null, copyLed = null, copyPlanned = 0;
+
+  function copyRow(led, a, b, cls) {
+    var r = el("div", "r" + (cls ? " " + cls : ""));
+    r.appendChild(el("span", null, a));
+    r.appendChild(el("span", null, b));
+    led.appendChild(r);
+    return r;
+  }
+
+  function openCopy(m) {
+    copyPlanned = m.files || 0;
+    content.innerHTML = "";
+    content.scrollTop = 0;
+
+    var box = el("div", "setup");
+    copyTitle = el("h2", null, "Aktarılıyor");
+    box.appendChild(copyTitle);
+
+    var dest = el("p", "dest");
+    dest.appendChild(document.createTextNode("Hedef: "));
+    dest.appendChild(el("b", null, m.destination));
+    box.appendChild(dest);
+
+    copyHead = el("p", "dest", fmtInt(copyPlanned) + " dosya, " + fmtBytes(m.bytes));
+    box.appendChild(copyHead);
+
+    copyNow = el("div", "live", "İlk dosya açılıyor");
+    box.appendChild(copyNow);
+
+    copyLed = el("div", "ledger");
+    box.appendChild(copyLed);
+
+    content.appendChild(box);
+    setStrip("info", "Aktarılıyor.", "Telefondan okunuyor, diske yazılıyor.");
+  }
+
+  function showCopy(m) {
+    if (!copyLed || !copyLed.isConnected) openCopy({
+      destination: "", files: m.planned, bytes: m.plannedBytes
+    });
+
+    if (m.file) copyNow.textContent = m.file;
+
+    copyLed.innerHTML = "";
+    copyRow(copyLed, "Kopyalandı", fmtInt(m.done) + " / " + fmtInt(m.planned || copyPlanned));
+    copyRow(copyLed, "Yazılan", fmtBytes(m.bytes));
+    if (m.failed > 0) copyRow(copyLed, "Alınamadı", fmtInt(m.failed), "bad");
+
+    var total = m.planned || copyPlanned;
+    if (total > 0) {
+      scanbar.className = "scanbar";
+      scanfill.style.width = Math.min(100, 100 * (m.done + m.failed) / total).toFixed(1) + "%";
+    }
+
+    setStrip("info", "Aktarılıyor.",
+      fmtInt(m.done) + " / " + fmtInt(total) + " dosya  ·  " + fmtBytes(m.bytes));
+  }
+
+  function endCopy(m) {
+    if (!copyLed || !copyLed.isConnected) return;
+
+    copyTitle.textContent = m.crashed ? "Yarıda kaldı" : "Aktarım bitti";
+    copyNow.textContent = m.crashed ? "Yarıda kaldı" : "Bitti";
+    copyLed.innerHTML = "";
+    copyRow(copyLed, "Kopyalandı", fmtInt(m.done) + " dosya, " + fmtBytes(m.bytes));
+    if (m.failed > 0) copyRow(copyLed, "Alınamadı", fmtInt(m.failed), "bad");
+    if (m.notReached > 0) copyRow(copyLed, "Sıra gelmedi", fmtInt(m.notReached), "bad");
+
+    var clean = !m.crashed && !m.failed && !m.notReached;
+    copyRow(copyLed, clean ? "Hepsi yerinde" : "Eksik kaldı", "",
+      clean ? "total" : "total bad");
+
+    // Alinamayanlar sayiyla degil, adla gosteriliyor: o dosya hala telefonda
+    // duruyor ve "3 tanesi olmadi" kisisinin yapabilecegi bir sey degil.
+    if (m.failures && m.failures.length) {
+      var list = el("div", "ledger");
+      m.failures.forEach(function (f) {
+        copyRow(list, f.name, f.error || "", "bad");
+      });
+      copyLed.parentNode.appendChild(el("h2", null, "Alınamayanlar"));
+      copyLed.parentNode.appendChild(list);
+    }
+
+    if (!clean) {
+      var again = el("button", "go", "Kalanları aktar");
+      again.type = "button";
+      again.addEventListener("click", function () { send({ cmd: "drives" }); });
+      copyLed.parentNode.appendChild(again);
+    }
+
+    if (m.crashed) setStrip("", "Aktarım yarıda kaldı.", m.message);
+    else if (clean) setStrip("info", "Aktarım bitti.", fmtInt(m.done) + " dosya kopyalandı.");
+    else setStrip("", "Aktarım bitti, eksikler var.", "Tekrar başlatmak biten dosyaları kopyalamaz.");
   }
 
   /* ---------------- boot with data ---------------- */

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Windows.Forms;
 using MediaTransfer.Core;
@@ -15,7 +16,7 @@ public sealed class MainWindow : Form
 {
     readonly WebView2 _web = new() { Dock = DockStyle.Fill };
     readonly ScanStore _store = new(SqliteScanSink.DefaultDatabasePath);
-    readonly ScanRunner _runner = new();
+    readonly ProbeRunner _runner = new();
     readonly TransferSetup _setup = new(SqliteScanSink.DefaultDatabasePath);
     // 300 ms rather than 500: the rows are inserted into the list rather than
     // redrawn, so a shorter interval costs a small indexed read and buys an
@@ -25,6 +26,14 @@ public sealed class MainWindow : Form
     bool _ready;
     int _progressFailures;
     long _lastFileId;
+
+    // Set for as long as a transfer is running, and the flag the progress tick
+    // reads to know which of the two jobs it is reporting on. The value is the
+    // ledger's highest id BEFORE the transfer began: the ledger is cumulative by
+    // design, so everything past this mark is what this run did.
+    long? _copyBaseline;
+    int _copyPlanned;
+    long _copyPlannedBytes;
 
     public MainWindow()
     {
@@ -38,7 +47,7 @@ public sealed class MainWindow : Form
 
         Controls.Add(_web);
         _progress.Tick += (_, _) => ReportProgress();
-        _runner.Exited += OnScannerExited;
+        _runner.Exited += OnProbeExited;
 
         Load += async (_, _) => await StartWebView();
     }
@@ -117,6 +126,7 @@ public sealed class MainWindow : Form
             case "drives": SendDrives(); break;
             case "browse": BrowseForFolder(); break;
             case "preflight": SendPreflight(e.WebMessageAsJson); break;
+            case "startTransfer": StartTransfer(e.WebMessageAsJson); break;
         }
     }
 
@@ -152,8 +162,8 @@ public sealed class MainWindow : Form
         if (_runner.IsRunning) return;
         try
         {
-            Diagnostics.Write("tarama baslatiliyor: " + ScanRunner.DefaultScannerPath);
-            _runner.Start(ScanRunner.DefaultScannerPath);
+            Diagnostics.Write("tarama baslatiliyor: " + ProbeRunner.DefaultScannerPath);
+            _runner.Start(ProbeRunner.DefaultScannerPath, ProbeJob.Scan);
             _progressFailures = 0;
             _lastFileId = 0;
             _progress.Start();
@@ -223,8 +233,9 @@ public sealed class MainWindow : Form
             string folder = root.TryGetProperty("folder", out var f) ? f.GetString() ?? "" : "";
             bool group = !root.TryGetProperty("group", out var g) || g.GetBoolean();
             long scanId = root.GetProperty("scanId").GetInt64();
+            string sources = root.TryGetProperty("sources", out var sv) ? sv.GetString() ?? "all" : "all";
 
-            var p = _setup.Check(scanId, path, folder, group);
+            var p = _setup.Check(scanId, path, folder, group, sources);
             Send(new
             {
                 type = "preflight",
@@ -244,10 +255,81 @@ public sealed class MainWindow : Form
         }
     }
 
+    /// <summary>
+    /// Starts the copier as a child process, the same way a scan is started.
+    ///
+    /// The preflight is run again here rather than trusting the figures the page
+    /// is showing. Those were measured when the page last asked, and a drive can
+    /// fill up between looking and pressing - which is precisely the failure
+    /// this project exists to prevent, so the last word on whether it fits
+    /// belongs to the moment the transfer actually begins.
+    /// </summary>
+    void StartTransfer(string json)
+    {
+        if (_runner.IsRunning) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            string path = root.GetProperty("root").GetString() ?? "";
+            string folder = root.TryGetProperty("folder", out var f) ? f.GetString() ?? "" : "";
+            bool group = !root.TryGetProperty("group", out var g) || g.GetBoolean();
+            long scanId = root.GetProperty("scanId").GetInt64();
+            string sources = root.TryGetProperty("sources", out var sv) ? sv.GetString() ?? "all" : "all";
+
+            var check = _setup.Check(scanId, path, folder, group, sources);
+            if (check.Files == 0)
+            {
+                Send(new { type = "error", message = "Seçilen kaynaklarda aktarılacak dosya yok." });
+                return;
+            }
+            if (!check.Fits)
+            {
+                Send(new { type = "error", message = check.Problem ?? "Bu konuma aktarılamaz." });
+                return;
+            }
+
+            // Read before the child starts, never after: a row it commits in the
+            // meantime would fall on the wrong side of the mark and go missing
+            // from the count for the rest of the transfer.
+            _copyBaseline = _store.Exists() ? _store.LatestCopyId() : 0;
+            _copyPlanned = check.Files;
+            _copyPlannedBytes = check.RequiredBytes;
+
+            Diagnostics.Write($"aktarim baslatiliyor: tarama {scanId} -> {check.Destination}");
+            _runner.Start(ProbeRunner.DefaultScannerPath, ProbeJob.Copy,
+                "--copy", check.Destination, scanId.ToString(CultureInfo.InvariantCulture), sources);
+
+            _progressFailures = 0;
+            _progress.Start();
+            Send(new
+            {
+                type = "transferStarted",
+                destination = check.Destination,
+                files = check.Files,
+                bytes = check.RequiredBytes,
+            });
+        }
+        catch (Exception ex)
+        {
+            _copyBaseline = null;
+            Diagnostics.Write("aktarim baslatilamadi: " + ex);
+            Send(new { type = "error", message = "Aktarım başlatılamadı: " + ex.Message });
+        }
+    }
+
     /* ---------------- app to page ---------------- */
+
+
 
     void ReportProgress()
     {
+        if (_copyBaseline is { } baseline)
+        {
+            ReportCopyProgress(baseline);
+            return;
+        }
+
         try
         {
             var running = _store.Exists() ? _store.RunningScan() : null;
@@ -305,14 +387,63 @@ public sealed class MainWindow : Form
         }
     }
 
-    void OnScannerExited(ScanExit exit)
+    /// <summary>
+    /// The transfer's half of the progress tick, read out of the ledger for the
+    /// same reason the scan's is read out of the file table: the child commits
+    /// as it goes and WAL lets this connection see it, so there is one channel
+    /// between the two processes instead of two that could disagree.
+    /// </summary>
+    void ReportCopyProgress(long baseline)
+    {
+        try
+        {
+            var p = _store.CopyProgressSince(baseline);
+            _progressFailures = 0;
+
+            Send(new
+            {
+                type = "copyProgress",
+                done = p.Done,
+                failed = p.Failed,
+                bytes = p.Bytes,
+                file = p.CurrentFile,
+                planned = _copyPlanned,
+                plannedBytes = _copyPlannedBytes,
+            });
+        }
+        catch (Exception ex)
+        {
+            // One lost read is a race with a commit and the next tick will get
+            // it. A run of them means the figures on screen have quietly stopped
+            // moving, and the user is owed that rather than a frozen number.
+            _progressFailures++;
+            Diagnostics.Write($"aktarim ilerlemesi okunamadi ({_progressFailures}): {ex.Message}");
+            if (_progressFailures == 6)
+            {
+                Send(new
+                {
+                    type = "progressLost",
+                    message = "Aktarım sürüyor ama ilerleme okunamıyor: " + ex.Message,
+                });
+            }
+        }
+    }
+
+    void OnProbeExited(ProbeExit exit)
     {
         // Raised on a thread pool thread. Everything below touches the window.
-        Diagnostics.Write($"tarayici cikti: kod {exit.ExitCode}, crashed={exit.Crashed}");
+        Diagnostics.Write($"{exit.Job} cikti: kod {exit.ExitCode}, crashed={exit.Crashed}");
         if (IsDisposed) return;
         BeginInvoke(() =>
         {
             _progress.Stop();
+
+            if (exit.Job == ProbeJob.Copy)
+            {
+                EndTransfer(exit);
+                return;
+            }
+
             Send(new
             {
                 type = "scanEnded",
@@ -324,6 +455,45 @@ public sealed class MainWindow : Form
                     : "",
             });
             SendScan();
+        });
+    }
+
+    /// <summary>
+    /// Reports what a finished transfer actually did, read back out of the
+    /// ledger rather than from anything the child said.
+    ///
+    /// That distinction is the point of the ledger. A child that was killed
+    /// mid-file printed nothing and exited with a code that explains nothing,
+    /// but its rows are on disk and they say exactly how far it got - so the
+    /// account given here is the same whether the transfer finished, was
+    /// cancelled, or died.
+    /// </summary>
+    void EndTransfer(ProbeExit exit)
+    {
+        long baseline = _copyBaseline ?? 0;
+        _copyBaseline = null;
+
+        var p = _store.CopyProgressSince(baseline);
+        var failures = p.Failed > 0 ? _store.CopyFailuresSince(baseline, 50) : [];
+        int notReached = Math.Max(0, _copyPlanned - p.Done - p.Failed);
+
+        Diagnostics.Write($"aktarim bitti: {p.Done} kopyalandi, {p.Failed} basarisiz, " +
+            $"{notReached} ulasilmadi, kod {exit.ExitCode}");
+
+        Send(new
+        {
+            type = "transferEnded",
+            done = p.Done,
+            failed = p.Failed,
+            notReached,
+            bytes = p.Bytes,
+            planned = _copyPlanned,
+            crashed = exit.Crashed,
+            failures,
+            message = exit.Crashed
+                ? "Aktarım beklenmedik şekilde durdu. Kopyalanan dosyalar yerinde; kabloyu çıkarıp " +
+                  "takın ve tekrar başlatın, biten dosyalar ikinci kez kopyalanmaz."
+                : "",
         });
     }
 

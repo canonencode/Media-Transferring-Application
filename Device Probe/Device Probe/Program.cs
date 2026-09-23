@@ -273,7 +273,12 @@ else
     try
     {
         sqliteSink = new SqliteScanSink();
-        Console.WriteLine($"Recording this scan to: {SqliteScanSink.DefaultDatabasePath}");
+        // Not printed in copy mode, which reaches this line before it knows it
+        // is a copy - and no scan is being recorded there.
+        if (args.Length == 0 || args[0] != "--copy")
+        {
+            Console.WriteLine($"Recording this scan to: {SqliteScanSink.DefaultDatabasePath}");
+        }
     }
     catch (Exception ex)
     {
@@ -402,6 +407,32 @@ if (identity.KeyIsFallback)
     Console.WriteLine("[NOTE] This device reports no serial number, so its history is filed under the WPD id, " +
         "which embeds the USB port. Plugged into a different port it will look like a different device.");
 }
+
+// --- Copy mode -----------------------------------------------------------
+// The transfer itself, and deliberately not part of the scan. They answer
+// different questions - the scan asks what the phone holds, this asks for the
+// bytes of what a scan already found - and joining them would mean a transfer
+// could only ever start from a scan taken seconds earlier, when the useful case
+// is the opposite: look on Monday, copy on Tuesday.
+//
+// It runs before OnScanStarted on purpose. A copy must not open a scan row: an
+// unfinished scan is a real state this database records, and writing one that
+// nothing will ever finish would leave a permanent 'running' row lying about
+// what happened.
+//
+// PROBE_NO_DB is not honoured here. Scanning without recording is a legitimate
+// thing to want; copying without recording is the exact failure this project
+// exists to prevent, so the ledger is not optional.
+if (args.Length > 1 && args[0] == "--copy")
+{
+    RunCopy(
+        args[1],
+        args.Length > 2 && long.TryParse(args[2], out long wantedScan) ? wantedScan : 0,
+        args.Length > 3 ? args[3] : "all");
+    CloseSession();
+    return;
+}
+
 
 bool cameraMode = IsCameraMode();
 sink.OnScanStarted(identity, cameraMode);
@@ -1161,6 +1192,393 @@ FileKind CheckSignatureWithHealthMonitoring(string objectId)
     }
 
     return kind;
+}
+
+// Takes the bytes of the files a scan found and writes them into a folder.
+//
+// Sequential and single threaded, which is a measured decision rather than a
+// simplification. A real mix of files read at 29.9 MB/s against 31.99 MB/s for
+// one large file, so per-file overhead was costing about six percent and
+// parallel streams had almost nothing to win. What the time actually goes on is
+// opening streams - 10.1 ms each on this phone, 278 ms on another - and that is
+// not something more threads through one USB endpoint would fix.
+//
+// Every file is written under a .part name and renamed only once its bytes are
+// on disk and verified. A rename within a volume is atomic, so a file under its
+// real name is a file that arrived whole: there is no moment where a half
+// written photo wears the name of a finished one.
+/// <param name="sources">
+/// Comma separated MediaSource ids ("camera", "app:com.whatsapp"), or "all".
+/// The ids rather than the labels, because a label is Turkish text that a
+/// vendor's folder naming can change underneath it, and a command line argument
+/// that shifts with the device is one nothing can be scripted against.
+/// </param>
+void RunCopy(string destinationRoot, long requestedScanId, string sources)
+{
+    destinationRoot = Path.GetFullPath(destinationRoot);
+
+
+
+    long scanId = requestedScanId;
+    string? scanDeviceKey = null;
+    var items = new List<TransferItem>();
+
+    using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+        $"Data Source={SqliteScanSink.DefaultDatabasePath};Mode=ReadOnly;Pooling=False"))
+    {
+        db.Open();
+
+        if (scanId <= 0)
+        {
+            using var pick = db.CreateCommand();
+            // Complete only. A partial scan is one that does not know what it
+            // missed, and copying from it would report a finished transfer of an
+            // unknown fraction of the phone.
+            pick.CommandText = "SELECT MAX(scan_id) FROM scan WHERE status = 'complete';";
+            scanId = pick.ExecuteScalar() is long id ? id : 0;
+        }
+        if (scanId <= 0)
+        {
+            Console.WriteLine("No completed scan to copy from. Run a scan first.");
+            return;
+        }
+
+        using (var owner = db.CreateCommand())
+        {
+            owner.CommandText = "SELECT device_key FROM scan WHERE scan_id = $s;";
+            owner.Parameters.AddWithValue("$s", scanId);
+            scanDeviceKey = owner.ExecuteScalar() as string;
+        }
+
+        using var q = db.CreateCommand();
+        // The same two kinds the setup page counted. App data stays where it is:
+        // it belongs to the app that wrote it and means nothing on a PC.
+        q.CommandText = """
+            SELECT object_id, path, name, size, modified_raw
+            FROM file WHERE scan_id = $s AND kind IN ('MediaFile', 'Document');
+            """;
+        q.Parameters.AddWithValue("$s", scanId);
+        using var r = q.ExecuteReader();
+        while (r.Read())
+        {
+            items.Add(new TransferItem(r.GetString(0), r.GetString(1), r.GetString(2),
+                r.IsDBNull(3) ? 0 : r.GetInt64(3), r.IsDBNull(4) ? null : r.GetString(4)));
+        }
+    }
+
+    // Object ids are this device's own handles and mean nothing on another
+    // phone. Without this check, plugging in the wrong device and running a
+    // transfer would fail on every file - or, if the ids happened to resolve,
+    // quietly write one phone's photos into a folder named after another.
+    if (scanDeviceKey is null)
+    {
+        Console.WriteLine($"Scan {scanId} is not in the database.");
+        return;
+    }
+    if (!string.Equals(scanDeviceKey, identity.DeviceKey, StringComparison.Ordinal))
+    {
+        Console.WriteLine($"Scan {scanId} belongs to a different device ({scanDeviceKey}); the one " +
+            $"plugged in is {identity.DeviceKey}. Scan this phone before copying from it.");
+        return;
+    }
+    if (items.Count == 0)
+    {
+        Console.WriteLine($"Scan {scanId} found no media or documents to copy.");
+        return;
+    }
+
+    var plan = TransferPlan.Build(items);
+    using var ledger = new TransferLedger(SqliteScanSink.DefaultDatabasePath);
+
+    // Read in one query rather than one per file. Thirteen thousand round trips
+    // to ask about an indexed column is work for nothing, and it happens before
+    // the first byte moves, where the user is watching a blank screen.
+    var remembered = ledger.AllFor(identity.DeviceKey);
+
+    // Decided in full before anything is written, for two reasons: the totals
+    // printed below have to be the real ones rather than the whole plan's, and a
+    // destination that cannot hold the transfer should be found out now rather
+    // than forty minutes in. Running out of disk half way is this project's own
+    // failure mode wearing a different hat.
+    var work = new List<(PlannedCopy Planned, string Target)>();
+    var claimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    long plannedBytes = 0;
+    int alreadyThere = 0;
+
+    // ForSources rather than a filter written here: the setup page measures
+    // free space against a selection and this transfers one, so the two have to
+    // agree about what a selection means down to the last file.
+    foreach (var planned in TransferPlan.ForSources(plan.Copies, sources))
+    {
+        string target = Path.Combine(destinationRoot,
+            planned.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+        bool exists = File.Exists(target);
+
+        remembered.TryGetValue(planned.Item.DevicePath, out CopyRecord? previous);
+        var decision = CopyDecision.Decide(previous, planned.Item.Size, planned.Item.ModifiedRaw,
+            exists, exists ? new FileInfo(target).Length : 0);
+
+        if (decision == CopyAction.Skip)
+        {
+            alreadyThere++;
+            continue;
+        }
+        if (decision == CopyAction.CopyAsNewVersion)
+        {
+            // The phone's file changed under a path whose earlier copy is
+            // already on disk. Both are kept; choosing between them is the
+            // owner's business, not this program's.
+            // Taken means either: already on the disk, or promised to an earlier
+            // file in this same pass, which has not written anything yet.
+            target = TransferPlan.NextFreeName(target,
+                candidate => File.Exists(candidate) || claimed.Contains(candidate));
+        }
+
+        claimed.Add(target);
+        work.Add((planned, target));
+        plannedBytes += Math.Max(0, planned.Item.Size);
+    }
+
+    Console.WriteLine($"Scan {scanId} -> {destinationRoot}");
+    if (sources is not ("all" or "")) Console.WriteLine($"Only: {sources}");
+    Console.WriteLine($"{work.Count} file(s) to copy, {plannedBytes / 1024 / 1024} MB. " +
+        $"{alreadyThere} already there.");
+
+    if (work.Count == 0)
+    {
+        Console.WriteLine("Nothing to do.");
+        return;
+    }
+
+    // A margin, not an exact fit: a filesystem needs room for its own
+    // bookkeeping, and a transfer that ends by filling the disk leaves the
+    // machine worse off than one that refuses to start.
+    try
+    {
+        var drive = new DriveInfo(Path.GetPathRoot(destinationRoot)!);
+        long needed = plannedBytes + Math.Max(256L * 1024 * 1024, plannedBytes / 50);
+        if (!drive.IsReady)
+        {
+            Console.WriteLine($"{drive.Name} is not ready.");
+            return;
+        }
+        if (drive.AvailableFreeSpace < needed)
+        {
+            Console.WriteLine($"Not enough room: {needed / 1024 / 1024} MB needed, " +
+                $"{drive.AvailableFreeSpace / 1024 / 1024} MB free on {drive.Name}.");
+            return;
+        }
+    }
+    catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+    {
+        Console.WriteLine($"Could not read {destinationRoot}: {ex.GetType().Name}: {ex.Message}");
+        return;
+    }
+
+    Directory.CreateDirectory(destinationRoot);
+
+    long copiedBytes = 0;
+    int copied = 0, failed = 0;
+    long lastProgress = DateTime.UtcNow.Ticks;
+    int copyAborted = 0;
+
+    // The session must be closed on the way out however this ends. Skipping it
+    // leaves the device locked after the process exits, and then every stream
+    // the NEXT run opens fails with "the device is unreachable" - measured, not
+    // feared: 1606 of 1607 signature checks failed that way once.
+    AppDomain.CurrentDomain.ProcessExit += (_, _) => CloseSession();
+
+    // Ctrl+C raises the flag rather than closing anything. The handler runs on a
+    // thread-pool thread while this one is very likely inside a COM call, so
+    // releasing the objects here would be a use-after-release against the code
+    // still using them. Cancelling the termination lets the loop stop at the
+    // next file and close the session from a thread that is idle.
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        Volatile.Write(ref copyAborted, 1);
+        Console.WriteLine("\n[CANCELLED] Stopping after the current file. Nothing is lost; " +
+            "run again to carry on.");
+        try { device.Cancel(); } catch (Exception) { }
+    };
+
+    // The same guard the walk has, for the same reason. A wedged device blocks
+    // inside a COM call with no error and no timeout of its own, and a transfer
+    // sits inside that risk for the better part of an hour rather than for
+    // seconds. Sixty seconds without a single byte is not a slow file: the
+    // slowest real read measured was under two.
+    var copyWatchdog = new Thread(() =>
+    {
+        while (Volatile.Read(ref copyAborted) == 0)
+        {
+            Thread.Sleep(2000);
+            if (Volatile.Read(ref copyAborted) == 1) return;
+
+            var idle = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Volatile.Read(ref lastProgress));
+            if (idle <= TimeSpan.FromSeconds(60)) continue;
+
+            Console.WriteLine($"\n[WARNING] No bytes for {idle.TotalSeconds:F0} seconds. The device has " +
+                "stopped answering mid-copy. Stopping, so the ledger reports what was actually taken; " +
+                "unplug and replug the phone, then run again to carry on.");
+            Volatile.Write(ref copyAborted, 1);
+            try { device.Cancel(); } catch (Exception) { }
+            return;
+        }
+    }) { IsBackground = true, Name = "wpd-copy-watchdog" };
+    copyWatchdog.Start();
+
+    var wall = System.Diagnostics.Stopwatch.StartNew();
+
+    foreach (var (planned, target) in work)
+    {
+        if (Volatile.Read(ref copyAborted) == 1) break;
+
+        var item = planned.Item;
+        string part = target + ".part";
+
+        // Written before the stream is opened, so that a pulled cable leaves a
+        // 'copying' row behind rather than silence. That row and the .part file
+        // are what make an interrupted transfer a recoverable one.
+        long copyId = ledger.Begin(identity.DeviceKey, item, target);
+
+        IStream? wpdStream = null;
+        IntPtr readPtr = IntPtr.Zero;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+
+            // A .part left by an earlier run is a prefix of a file, and a prefix
+            // of a photograph is not a photograph. Appending to it would produce
+            // something corrupt that passes a length check.
+            if (File.Exists(part)) File.Delete(part);
+
+            uint optimal = 0;
+            resources.GetStream(item.ObjectId, ref resourceDefaultKey, 0 /* STGM_READ */, ref optimal, out wpdStream);
+            var stream = (System.Runtime.InteropServices.ComTypes.IStream)wpdStream;
+
+            // The driver's own figure. Reading in the size it asks for is what
+            // the measurement ran at; a round number of our choosing would be a
+            // guess against a value the device is telling us.
+            int buffer = optimal > 0 ? (int)optimal : 262144;
+            byte[] chunk = new byte[buffer];
+            readPtr = System.Runtime.InteropServices.Marshal.AllocHGlobal(sizeof(int));
+
+            long written = 0;
+            string sourceHash;
+            using (var hasher = System.Security.Cryptography.SHA256.Create())
+            using (var file = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, buffer))
+            {
+                while (true)
+                {
+                    if (Volatile.Read(ref copyAborted) == 1)
+                    {
+                        throw new OperationCanceledException("Stopped part way through this file.");
+                    }
+
+                    // Same discipline as the signature check: zero the slot
+                    // first, then clamp what comes back. AllocHGlobal hands back
+                    // uninitialised memory and this slot is reused every
+                    // iteration, so a driver that reported success without
+                    // writing the count would have the file built out of
+                    // whatever happened to be there before.
+                    System.Runtime.InteropServices.Marshal.WriteInt32(readPtr, 0);
+                    stream.Read(chunk, chunk.Length, readPtr);
+                    int got = System.Runtime.InteropServices.Marshal.ReadInt32(readPtr);
+                    if (got <= 0) break;
+                    if (got > chunk.Length) got = chunk.Length;
+
+                    file.Write(chunk, 0, got);
+                    hasher.TransformBlock(chunk, 0, got, null, 0);
+                    written += got;
+                    Volatile.Write(ref lastProgress, DateTime.UtcNow.Ticks);
+                }
+                hasher.TransformFinalBlock([], 0, 0);
+                sourceHash = Convert.ToHexString(hasher.Hash!);
+            }
+
+            // What the device promised against what arrived. IStream::Read may
+            // legally return fewer bytes than asked for and still report
+            // success, which is how a short read once turned a real photo into a
+            // file that matched no signature - the same trap one layer down,
+            // where the result would be a truncated photograph instead.
+            if (item.Size > 0 && written != item.Size)
+            {
+                throw new IOException($"{item.Size} bytes expected, {written} arrived.");
+            }
+
+            // Read back from the disk. Hashing while writing proves what was
+            // sent; hashing what landed proves what was stored, and only the
+            // second catches a truncated write or a drive that lied about a
+            // flush. It costs a local read - minutes against the hour the whole
+            // transfer takes - and it is the difference between saying a file
+            // was copied and knowing it.
+            if (!string.Equals(HashFile(part), sourceHash, StringComparison.Ordinal))
+            {
+                throw new IOException("The file read back from disk is not the one that was written.");
+            }
+
+            // Only now does it get the real name.
+            if (File.Exists(target)) File.Delete(target);
+            File.Move(part, target);
+
+            ledger.Complete(copyId, written, sourceHash);
+            copiedBytes += written;
+            copied++;
+
+            if (copied % 50 == 0)
+            {
+                double mbPerSecond = copiedBytes / 1024.0 / 1024.0 / Math.Max(0.001, wall.Elapsed.TotalSeconds);
+                Console.WriteLine($"  {copied}/{work.Count}  {copiedBytes / 1024 / 1024} MB  " +
+                    $"{mbPerSecond:F1} MB/s  {failed} failed");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Recorded, not forgotten. A file that could not be taken is still
+            // on the phone, and a transfer that quietly drops its failures
+            // reports success while leaving things behind.
+            failed++;
+            ledger.Fail(copyId, $"{ex.GetType().Name}: {ex.Message}");
+            try { if (File.Exists(part)) File.Delete(part); } catch (IOException) { }
+            if (failed <= 10) Console.WriteLine($"  [FAIL] {item.Name}: {ex.Message}");
+        }
+        finally
+        {
+            if (readPtr != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(readPtr);
+            if (wpdStream is not null) System.Runtime.InteropServices.Marshal.ReleaseComObject(wpdStream);
+        }
+    }
+
+    bool stopped = Volatile.Read(ref copyAborted) == 1;
+    Volatile.Write(ref copyAborted, 1);
+    wall.Stop();
+
+    int notReached = work.Count - copied - failed;
+    var counts = ledger.Counts(identity.DeviceKey);
+
+    Console.WriteLine();
+    Console.WriteLine(stopped ? "STOPPED EARLY." : "DONE.");
+    Console.WriteLine($"  copied        : {copied} file(s), {copiedBytes / 1024 / 1024} MB " +
+        $"in {wall.Elapsed.TotalMinutes:F1} min");
+    Console.WriteLine($"  already there : {alreadyThere}");
+    Console.WriteLine($"  failed        : {failed}");
+    if (notReached > 0) Console.WriteLine($"  not reached   : {notReached}");
+    Console.WriteLine($"  ledger        : {counts.Done} done, {counts.Failed} failed, " +
+        $"{counts.Unfinished} unfinished for this device");
+
+    if (stopped || failed > 0 || notReached > 0)
+    {
+        Console.WriteLine("\nRun again to carry on. Files that finished are not copied twice.");
+    }
+}
+
+// Streamed rather than File.ReadAllBytes: some of these are video files, and the
+// point of the check is not to need the whole file in memory to make it.
+string HashFile(string path)
+{
+    using var sha = System.Security.Cryptography.SHA256.Create();
+    using var file = File.OpenRead(path);
+    return Convert.ToHexString(sha.ComputeHash(file));
 }
 
 // Copies a spread of real files and reports what it cost. Reads them exactly
