@@ -27,6 +27,9 @@ namespace MediaTransfer.Core;
 /// </summary>
 public sealed class SqliteScanSink : IScanSink, IDisposable
 {
+    /// <summary>The database's shape is ScanSchema's business; this is the name callers already use.</summary>
+    public static int SchemaVersion => ScanSchema.Version;
+
     // Rows are written inside a transaction because 14,000 individual commits
     // take minutes - the disk syncs on every one. Committing periodically
     // rather than once at the end is the trade: a hard kill loses at most this
@@ -144,7 +147,7 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
             Run("PRAGMA journal_mode=WAL;");
             Run("PRAGMA synchronous=NORMAL;");
             Run("PRAGMA foreign_keys=ON;");
-            Migrate();
+            ScanSchema.Apply(connection);
         }
         catch
         {
@@ -153,65 +156,8 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
         }
     }
 
-    /// <summary>
-    /// What this build knows how to write. Stored in the file's own header, so
-    /// a database carries its shape with it.
-    /// </summary>
-    public const int SchemaVersion = 2;
 
-    /// <summary>
-    /// Brings the file up to <see cref="SchemaVersion"/>, or refuses it.
-    ///
-    /// CREATE TABLE IF NOT EXISTS silently does nothing to a database that
-    /// already has the table, so adding a column to the schema text would leave
-    /// every existing file on the old shape and then fail at INSERT time on a
-    /// user's machine. No test would catch it either, because tests open fresh
-    /// files. That is what this replaces.
-    ///
-    /// The refusal matters more than the upgrade. An older build opening a
-    /// newer database cannot know which columns it is failing to fill, and a
-    /// scan written half-blind is worse than one not written at all.
-    /// </summary>
-    void Migrate()
-    {
-        long version = UserVersion();
-        if (version > SchemaVersion)
-        {
-            throw new InvalidOperationException(
-                $"Bu veritabanı daha yeni bir sürümle yazılmış (şema {version}, bu sürüm {SchemaVersion}). " +
-                "Eski bir sürümle yazmak, dolduramadığı alanları sessizce boş bırakır.");
-        }
 
-        // Version 0 is both a brand new file and every file written before
-        // versioning existed. IF NOT EXISTS makes running the schema safe for
-        // both.
-        if (version == 0) Run(Schema);
-
-        // 1 -> 2: unresolved_objects. Added because a scan marked partial for
-        // that reason had no way to say so, and an unexplained "incomplete"
-        // warning is one a user learns to ignore.
-        if (version < 2) AddColumn("scan", "unresolved_objects", "INTEGER");
-
-        Run($"PRAGMA user_version = {SchemaVersion};");
-    }
-
-    long UserVersion()
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA user_version;";
-        return command.ExecuteScalar() is long v ? v : 0;
-    }
-
-    /// <summary>Adds a column unless it is already there - ALTER TABLE throws on a repeat.</summary>
-    void AddColumn(string table, string column, string type)
-    {
-        using var check = connection.CreateCommand();
-        check.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = $c;";
-        check.Parameters.AddWithValue("$c", column);
-        if (Convert.ToInt64(check.ExecuteScalar() ?? 0L) > 0) return;
-
-        Run($"ALTER TABLE {table} ADD COLUMN {column} {type};");
-    }
 
     void Run(string sql)
     {
@@ -230,96 +176,6 @@ public sealed class SqliteScanSink : IScanSink, IDisposable
     // project exists to prevent. Duplicate objects are already prevented
     // upstream by the walk; anything that still arrives twice is a real device
     // oddity worth keeping.
-    const string Schema = """
-        CREATE TABLE IF NOT EXISTS device (
-            device_key      TEXT PRIMARY KEY,
-            key_is_fallback INTEGER NOT NULL,
-            wpd_id          TEXT NOT NULL,
-            friendly_name   TEXT NOT NULL,
-            serial          TEXT,
-            manufacturer    TEXT,
-            model           TEXT,
-            first_seen_utc  TEXT NOT NULL,
-            last_seen_utc   TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS scan (
-            scan_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_key   TEXT NOT NULL REFERENCES device(device_key),
-            started_utc  TEXT NOT NULL,
-            finished_utc TEXT,
-            status       TEXT NOT NULL,
-            camera_mode  INTEGER NOT NULL,
-            completed INTEGER, stalled INTEGER, faulted INTEGER,
-            media_files INTEGER, documents INTEGER, undetermined_files INTEGER,
-            total_files_seen INTEGER, subtree_losses INTEGER,
-            signature_checks_run INTEGER, caught_by_signature_only INTEGER,
-            signature_check_errors INTEGER, files_skipped_by_breaker INTEGER,
-            signature_checking_disabled INTEGER, file_property_misses INTEGER,
-            unresolved_objects INTEGER,
-            retry_ran INTEGER, retry_skip_reason TEXT, retry_attempted INTEGER,
-            recovered_files INTEGER, recovered_folders INTEGER,
-            still_unreadable INTEGER, hidden_subtrees INTEGER, retry_new_failures INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS file (
-            file_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-            scan_id       INTEGER NOT NULL REFERENCES scan(scan_id),
-            path          TEXT NOT NULL,
-            name          TEXT NOT NULL,
-            object_id     TEXT NOT NULL,
-            persistent_id TEXT,
-            size          INTEGER,
-            modified_raw  TEXT,
-            kind          TEXT NOT NULL,
-            recovered     INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS folder (
-            folder_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-            scan_id       INTEGER NOT NULL REFERENCES scan(scan_id),
-            path          TEXT NOT NULL,
-            name          TEXT NOT NULL,
-            object_id     TEXT NOT NULL,
-            persistent_id TEXT,
-            recovered     INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS skipped_folder (
-            scan_id INTEGER NOT NULL REFERENCES scan(scan_id),
-            path    TEXT NOT NULL,
-            reason  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS scan_error (
-            scan_id     INTEGER NOT NULL REFERENCES scan(scan_id),
-            object_id   TEXT NOT NULL,
-            parent_path TEXT NOT NULL,
-            stage       TEXT NOT NULL,
-            hresult     INTEGER NOT NULL,
-            message     TEXT NOT NULL
-        );
-
-        -- MISSING: scan_root. Nothing records WHICH storage roots a scan
-        -- covered, so a phone scanned with its SD card removed completes
-        -- cleanly and every file on that card later reads as deleted. The J7
-        -- exposes three storage objects, so this is a real configuration, not
-        -- a hypothetical. Finding A6; it also fixes the localized-storage-name
-        -- problem, where changing the phone's language renames every path.
-        --
-        CREATE INDEX IF NOT EXISTS ix_file_scan_path ON file(scan_id, path);
-        CREATE INDEX IF NOT EXISTS ix_file_scan_kind ON file(scan_id, kind);
-        CREATE INDEX IF NOT EXISTS ix_folder_scan_path ON folder(scan_id, path);
-        CREATE INDEX IF NOT EXISTS ix_scan_device ON scan(device_key, started_utc);
-
-        -- SQLite does not index a foreign key for you, and these two are read
-        -- and deleted per scan. Without them, pruning one old scan scans both
-        -- tables end to end. (CREATE INDEX IF NOT EXISTS does apply to an
-        -- existing database, unlike an added column - see the user_version note
-        -- above for the case that does not.)
-        CREATE INDEX IF NOT EXISTS ix_scan_error_scan ON scan_error(scan_id);
-        CREATE INDEX IF NOT EXISTS ix_skipped_folder_scan ON skipped_folder(scan_id);
-        """;
 
     public void OnScanStarted(DeviceIdentity device, bool cameraMode)
     {
