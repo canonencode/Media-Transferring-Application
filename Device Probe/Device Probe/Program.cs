@@ -1300,38 +1300,100 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
     // destination that cannot hold the transfer should be found out now rather
     // than forty minutes in. Running out of disk half way is this project's own
     // failure mode wearing a different hat.
+    // ForSources rather than a filter written here: the setup page measures
+    // free space against a selection and this transfers one, so the two have to
+    // agree about what a selection means down to the last file.
+    var selected = TransferPlan.ForSources(plan.Copies, sources);
+
+    // Every destination this run has already promised to SOME file. The naming
+    // helper needs it: it hands out the next name nothing has taken, and until
+    // this existed "nothing has taken it" was asked only of the disk - where
+    // none of the plan's files have been written yet.
+    var plannedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var promised in selected)
+    {
+        plannedTargets.Add(Path.Combine(destinationRoot,
+            promised.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+    }
+
+    // Where finished copies are, according to the ledger. Used to make sure the
+    // staging name never lands on one of them.
+    var recordedDestinations = new HashSet<string>(
+        remembered.Values.Where(r => r.Status == "done").Select(r => r.Destination),
+        StringComparer.OrdinalIgnoreCase);
+
     var work = new List<(PlannedCopy Planned, string Target)>();
     var claimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     long plannedBytes = 0;
     int alreadyThere = 0;
 
-    // ForSources rather than a filter written here: the setup page measures
-    // free space against a selection and this transfers one, so the two have to
-    // agree about what a selection means down to the last file.
-    foreach (var planned in TransferPlan.ForSources(plan.Copies, sources))
+    foreach (var planned in selected)
     {
         string target = Path.Combine(destinationRoot,
             planned.RelativePath.Replace('/', Path.DirectorySeparatorChar));
-        bool exists = File.Exists(target);
-
         remembered.TryGetValue(planned.Item.DevicePath, out CopyRecord? previous);
+
+        // The file the RECORD is about, which is not always the one the plan
+        // would choose today. A version kept alongside an older one lives under
+        // a numbered name while the plan, being deterministic, goes on pointing
+        // at the bare one. Measuring the plan's choice against a record about a
+        // different file answers a question nobody asked: it says "already
+        // there" for a photograph that was never copied, and "wrong length" for
+        // one that is perfectly fine - and that second answer leads straight to
+        // the delete below.
+        string measured = previous is { Status: "done" } ? previous.Destination : target;
+        bool measuredExists = File.Exists(measured);
+
         var decision = CopyDecision.Decide(previous, planned.Item.Size, planned.Item.ModifiedRaw,
-            exists, exists ? new FileInfo(target).Length : 0);
+            measuredExists, measuredExists ? new FileInfo(measured).Length : 0);
 
         if (decision == CopyAction.Skip)
         {
             alreadyThere++;
             continue;
         }
-        if (decision == CopyAction.CopyAsNewVersion)
+
+        // Something is already sitting where this file would go. It is safe to
+        // replace ONLY if the ledger says it is this same source's own earlier
+        // copy; anything else is a file this program cannot account for - the
+        // version it deliberately kept last run, or another phone's photograph
+        // backed up into the same folder - and the copy below deletes the
+        // target before renaming. Copying twice costs seconds. Deleting the
+        // only remaining version of a photograph costs the photograph.
+        // Deliberately not restricted to 'done' rows. A run that died between
+        // the rename and the ledger update leaves the finished file under its
+        // real name with the row still saying 'copying' - and that file is
+        // still this source's own. Demanding 'done' here would make the next
+        // run treat it as a stranger and lay a duplicate down beside it.
+        bool targetIsOurOwn = previous is not null
+            && string.Equals(previous.Destination, target, StringComparison.OrdinalIgnoreCase);
+
+        // Every file is staged as "<target>.part" and whatever sits under that
+        // name is deleted first. TransferPlan promises no two files share a
+        // destination; it promises nothing about destination + ".part", which is
+        // the namespace actually written into. A phone holding both "photo.jpg"
+        // and "photo.jpg.part" - a browser's half-finished download, which the
+        // classifier keeps because its first bytes are a real JPEG - would have
+        // one finished copy standing on the other's scratch name, and the second
+        // file copied would delete the first. The same goes for a finished copy
+        // an EARLIER run left there, which the ledger still vouches for.
+        string wouldStageOver = target + ".part";
+        bool stagingHitsRealFile = plannedTargets.Contains(wouldStageOver)
+            || recordedDestinations.Contains(wouldStageOver);
+
+        if (decision == CopyAction.CopyAsNewVersion || claimed.Contains(target)
+            || stagingHitsRealFile
+            || (File.Exists(target) && !targetIsOurOwn))
         {
-            // The phone's file changed under a path whose earlier copy is
-            // already on disk. Both are kept; choosing between them is the
-            // owner's business, not this program's.
-            // Taken means either: already on the disk, or promised to an earlier
-            // file in this same pass, which has not written anything yet.
+            // "Taken" has to include the rest of the PLAN, not just the disk and
+            // this pass's own claims. Every later file's destination is already
+            // decided and none of them is written yet, so asking only the disk
+            // hands this file a name the plan has promised to another one - and
+            // the later file then deletes this one to take its place.
             target = TransferPlan.NextFreeName(target,
-                candidate => File.Exists(candidate) || claimed.Contains(candidate));
+                candidate => File.Exists(candidate)
+                    || claimed.Contains(candidate)
+                    || plannedTargets.Contains(candidate));
         }
 
         claimed.Add(target);
@@ -1379,8 +1441,21 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
 
     long copiedBytes = 0;
     int copied = 0, failed = 0;
+    // Counts failures with no success in between. The scanner has a proper
+    // health monitor for the same shape of problem; the copier needs only the
+    // blunt version, because the failure that matters here is durable rather
+    // than flaky: once the destination is full or the drive is unplugged, every
+    // remaining file fails for the same reason. Grinding through thirteen
+    // thousand of them costs a device round trip and two committed rows each,
+    // prints nothing (failures stop printing after ten and the progress line
+    // needs a success to advance), and looks exactly like a freeze.
+    int failuresInARow = 0;
+    string? breakerReason = null;
     long lastProgress = DateTime.UtcNow.Ticks;
     int copyAborted = 0;
+    // Raised when the copy loop is provably out of the device's hands, so the
+    // watchdog can tell "stopped, tidying up" apart from "still wedged".
+    int copyLoopLeft = 0;
 
     // The session must be closed on the way out however this ends. Skipping it
     // leaves the device locked after the process exits, and then every stream
@@ -1420,9 +1495,36 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
             Console.WriteLine($"\n[WARNING] No bytes for {idle.TotalSeconds:F0} seconds. The device has " +
                 "stopped answering mid-copy. Stopping, so the ledger reports what was actually taken; " +
                 "unplug and replug the phone, then run again to carry on.");
+            // Flushed because this project has watched a warning sit invisible
+            // in a redirected stdout buffer for 22 minutes while the user stared
+            // at a window that had simply stopped.
+            Console.Out.Flush();
+
             Volatile.Write(ref copyAborted, 1);
             try { device.Cancel(); } catch (Exception) { }
-            return;
+
+            // ESCALATION, and the reason it is not optional: raising a flag only
+            // helps if something is still running to read it. Both places that
+            // read copyAborted are in the copy loop, and a thread parked inside
+            // a COM call reaches neither. Cancel() being ignored is not a fear
+            // either - it was measured on this project's own hardware, where the
+            // scan watchdog fired, called Cancel(), and the walk carried on for
+            // another 4,838 objects. The scan path escalates for exactly this
+            // reason; the copy path promised "the ledger reports what was
+            // actually taken" and then had no way to keep that promise.
+            for (int waited = 0; waited < 20; waited++)
+            {
+                Thread.Sleep(1000);
+                if (Volatile.Read(ref copyLoopLeft) == 1) return;
+            }
+
+            Console.WriteLine("[FATAL] The transfer is still stuck 20 seconds after being told to stop, " +
+                "which means the device is wedged inside a call that will not return. Ending the process " +
+                "so what WAS copied is reported rather than waited on.");
+            Console.WriteLine("Every finished file is already on disk and recorded. Unplug and replug the " +
+                "phone, then run the same command again to carry on.");
+            Console.Out.Flush();
+            Environment.FailFast("WPD copy thread unrecoverable: wedged inside a COM call, Cancel() ignored.");
         }
     }) { IsBackground = true, Name = "wpd-copy-watchdog" };
     copyWatchdog.Start();
@@ -1439,7 +1541,22 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
         // Written before the stream is opened, so that a pulled cable leaves a
         // 'copying' row behind rather than silence. That row and the .part file
         // are what make an interrupted transfer a recoverable one.
-        long copyId = ledger.Begin(identity.DeviceKey, item, target);
+        //
+        // Outside the per-file try on purpose, so it needs its own: a copy with
+        // no row is a file taken off the phone that nothing recorded, which is
+        // the one thing this program exists to prevent. If the ledger cannot be
+        // written, the run stops here rather than carrying on unrecorded.
+        long copyId;
+        try
+        {
+            copyId = ledger.Begin(identity.DeviceKey, item, target);
+        }
+        catch (Exception ex)
+        {
+            breakerReason = $"Defter yazılamadı, aktarım kayıt tutmadan sürdürülemez: {ex.Message}";
+            Volatile.Write(ref copyAborted, 1);
+            break;
+        }
 
         IStream? wpdStream = null;
         IntPtr readPtr = IntPtr.Zero;
@@ -1456,10 +1573,14 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
             resources.GetStream(item.ObjectId, ref resourceDefaultKey, 0 /* STGM_READ */, ref optimal, out wpdStream);
             var stream = (System.Runtime.InteropServices.ComTypes.IStream)wpdStream;
 
-            // The driver's own figure. Reading in the size it asks for is what
-            // the measurement ran at; a round number of our choosing would be a
-            // guess against a value the device is telling us.
-            int buffer = optimal > 0 ? (int)optimal : 262144;
+            // The driver's own figure, within reason. Reading in the size it
+            // asks for is what the measurement ran at, so it is preferred to a
+            // round number of our choosing - but it is an unsigned value from a
+            // device, and nothing here has ever checked it. Anything at or above
+            // 2 GB casts to a negative int and throws on `new byte[]`, and a
+            // driver answering 1 would read the phone a byte at a time. Neither
+            // has been seen; neither costs anything to rule out.
+            int buffer = optimal is >= 4096 and <= 8 * 1024 * 1024 ? (int)optimal : 262144;
             byte[] chunk = new byte[buffer];
             readPtr = System.Runtime.InteropServices.Marshal.AllocHGlobal(sizeof(int));
 
@@ -1512,7 +1633,9 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
             // flush. It costs a local read - minutes against the hour the whole
             // transfer takes - and it is the difference between saying a file
             // was copied and knowing it.
-            if (!string.Equals(HashFile(part), sourceHash, StringComparison.Ordinal))
+            string onDisk = HashFile(part,
+                () => Volatile.Write(ref lastProgress, DateTime.UtcNow.Ticks));
+            if (!string.Equals(onDisk, sourceHash, StringComparison.Ordinal))
             {
                 throw new IOException("The file read back from disk is not the one that was written.");
             }
@@ -1524,6 +1647,7 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
             ledger.Complete(copyId, written, sourceHash);
             copiedBytes += written;
             copied++;
+            failuresInARow = 0;
 
             if (copied % 50 == 0)
             {
@@ -1532,15 +1656,43 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
                     $"{mbPerSecond:F1} MB/s  {failed} failed");
             }
         }
+        catch (OperationCanceledException)
+        {
+            // Not a failure: nothing is wrong with this file, the run was
+            // stopped part way through it. The row stays 'copying', which is
+            // what the ledger says an interrupted copy looks like, and the next
+            // run treats it as unfinished and does it again. Calling Fail here
+            // would blame the device for the user's Ctrl+C, permanently.
+            try { if (File.Exists(part)) File.Delete(part); } catch (IOException) { }
+        }
         catch (Exception ex)
         {
             // Recorded, not forgotten. A file that could not be taken is still
             // on the phone, and a transfer that quietly drops its failures
             // reports success while leaving things behind.
             failed++;
-            ledger.Fail(copyId, $"{ex.GetType().Name}: {ex.Message}");
+            failuresInARow++;
+            try
+            {
+                ledger.Fail(copyId, $"{ex.GetType().Name}: {ex.Message}");
+            }
+            catch (Exception ledgerError)
+            {
+                // The ledger is the whole point; if it cannot be written the run
+                // has to stop, and it has to stop SAYING so rather than by
+                // unwinding out of the loop and skipping the summary.
+                breakerReason = "Defter yazılamadı: " + ledgerError.Message;
+                Volatile.Write(ref copyAborted, 1);
+            }
             try { if (File.Exists(part)) File.Delete(part); } catch (IOException) { }
             if (failed <= 10) Console.WriteLine($"  [FAIL] {item.Name}: {ex.Message}");
+
+            if (breakerReason is null && failuresInARow >= 20)
+            {
+                breakerReason = $"Üst üste {failuresInARow} dosya alınamadı. Son hata: " +
+                    $"{ex.GetType().Name}: {ex.Message}";
+                Volatile.Write(ref copyAborted, 1);
+            }
         }
         finally
         {
@@ -1550,6 +1702,9 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
     }
 
     bool stopped = Volatile.Read(ref copyAborted) == 1;
+    // Before raising copyAborted, so the watchdog can tell an orderly stop from
+    // a device that is still holding the thread hostage.
+    Volatile.Write(ref copyLoopLeft, 1);
     Volatile.Write(ref copyAborted, 1);
     wall.Stop();
 
@@ -1558,6 +1713,7 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
 
     Console.WriteLine();
     Console.WriteLine(stopped ? "STOPPED EARLY." : "DONE.");
+    if (breakerReason is not null) Console.WriteLine($"  sebep        : {breakerReason}");
     Console.WriteLine($"  copied        : {copied} file(s), {copiedBytes / 1024 / 1024} MB " +
         $"in {wall.Elapsed.TotalMinutes:F1} min");
     Console.WriteLine($"  already there : {alreadyThere}");
@@ -1572,13 +1728,30 @@ void RunCopy(string destinationRoot, long requestedScanId, string sources)
     }
 }
 
-// Streamed rather than File.ReadAllBytes: some of these are video files, and the
-// point of the check is not to need the whole file in memory to make it.
-string HashFile(string path)
+// Streamed rather than File.ReadAllBytes: some of these are video files - the
+// largest on the test phone is 2.1 GB - and the point of the check is not to
+// need the whole file in memory to make it.
+//
+// onProgress is not decoration. This re-read can take minutes on a slow
+// destination, and the watchdog measures silence: 60 seconds with no sign of
+// life and it declares the phone dead and stops the transfer. A 2.1 GB file
+// over USB 2 at ~30 MB/s takes 70 seconds to hash, so without this the copier
+// aborts itself on its own largest files and tells the user to replug a phone
+// that was never the problem.
+string HashFile(string path, Action? onProgress = null)
 {
     using var sha = System.Security.Cryptography.SHA256.Create();
     using var file = File.OpenRead(path);
-    return Convert.ToHexString(sha.ComputeHash(file));
+
+    byte[] buffer = new byte[1 << 20];
+    int got;
+    while ((got = file.Read(buffer, 0, buffer.Length)) > 0)
+    {
+        sha.TransformBlock(buffer, 0, got, null, 0);
+        onProgress?.Invoke();
+    }
+    sha.TransformFinalBlock([], 0, 0);
+    return Convert.ToHexString(sha.Hash!);
 }
 
 // Copies a spread of real files and reports what it cost. Reads them exactly

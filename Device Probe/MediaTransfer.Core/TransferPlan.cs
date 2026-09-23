@@ -56,11 +56,22 @@ public static class TransferPlan
     public static TransferPlanResult Build(IEnumerable<TransferItem> items)
     {
         // Sorted before anything is numbered, so two runs over the same rows
-        // hand out the same suffixes. Device path first because it is the one
-        // field guaranteed unique within a scan.
+        // hand out the same suffixes.
+        //
+        // ObjectId is the third key because the first two do not settle every
+        // pair. The scan deliberately keeps two rows when two objects share a
+        // path - MTP keys on handles, not names, so one folder really can hold
+        // two different files called the same thing, and collapsing them would
+        // be silent data loss. For such a pair both keys tie, the query that
+        // reads them back has no ORDER BY, and a stable sort then leaves them in
+        // whatever order SQLite happened to return - which is free to change
+        // after a later scan, a VACUUM or a version bump. Which one gets
+        // "a.jpg" and which gets "a (2).jpg" would change with it, and a resumed
+        // transfer would copy both again under each other's names.
         var ordered = items
             .OrderBy(i => i.DevicePath, StringComparer.Ordinal)
             .ThenBy(i => i.Name, StringComparer.Ordinal)
+            .ThenBy(i => i.ObjectId, StringComparer.Ordinal)
             .ToList();
 
         var used = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -133,7 +144,15 @@ public static class TransferPlan
     /// </param>
     public static IReadOnlyList<PlannedCopy> ForSources(IReadOnlyList<PlannedCopy> copies, string? sources)
     {
-        if (string.IsNullOrWhiteSpace(sources) || sources.Trim() == "all") return copies;
+        // OrdinalIgnoreCase, like every other token below. "==" on string is
+        // ordinal, so "ALL" typed on a command line used to match nothing: the
+        // copier printed "Nothing to do" and the setup page reported a
+        // comfortable fit, over a phone with nothing backed up.
+        if (string.IsNullOrWhiteSpace(sources) ||
+            string.Equals(sources.Trim(), "all", StringComparison.OrdinalIgnoreCase))
+        {
+            return copies;
+        }
 
         var wanted = new HashSet<string>(
             sources.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()),
@@ -204,6 +223,34 @@ public static class TransferPlan
         string cleaned = sb.ToString().TrimEnd(' ', '.');
 
         if (cleaned.Length == 0) return "adsiz";
+
+        // NTFS refuses any single path component over 255 characters, and the
+        // "\\?\" prefix .NET applies for long paths does NOT lift that - measured
+        // on Windows 11, 256 fails with ERROR_INVALID_NAME. The budget here is
+        // smaller still, because two things get added later: the copier stages
+        // every file as "<name>.part" (5), and a reserved stem gains a leading
+        // "_" (1).
+        //
+        // Android's own limit is 255 BYTES and its download manager truncates
+        // long titles to exactly that, so names sitting on the boundary are an
+        // ordinary thing to find. Without this the file failed to stage, failed
+        // identically on every retry, and could never be backed up at all.
+        const int MaxName = 255 - 5 - 1;
+        if (cleaned.Length > MaxName)
+        {
+            string tail = Path.GetExtension(cleaned);
+            // A late dot in a long name is not necessarily an extension, and
+            // keeping 40 characters of one would eat the part worth reading.
+            if (tail.Length > 20) tail = "";
+
+            int keep = MaxName - tail.Length;
+            // Never cut between the halves of a surrogate pair: the result is an
+            // unpaired half, which is exactly what the loop above repairs.
+            if (char.IsHighSurrogate(cleaned[keep - 1])) keep--;
+
+            cleaned = (cleaned[..keep] + tail).TrimEnd(' ', '.');
+            if (cleaned.Length == 0) return "adsiz";
+        }
 
         string stem = Path.GetFileNameWithoutExtension(cleaned);
         if (ReservedNames.Contains(stem))

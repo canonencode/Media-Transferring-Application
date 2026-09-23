@@ -126,7 +126,8 @@ public sealed class TransferLedger : IDisposable
     {
         using var command = _connection.CreateCommand();
         command.CommandText = """
-            SELECT source_path, source_size, source_modified, destination, status, sha256
+            SELECT source_path, source_size, source_modified, destination, status, sha256,
+                   bytes_copied
             FROM copy WHERE device_key = $device AND source_path = $path
             ORDER BY copy_id DESC LIMIT 1;
             """;
@@ -142,7 +143,8 @@ public sealed class TransferLedger : IDisposable
             SourceModified: reader.IsDBNull(2) ? null : reader.GetString(2),
             Destination: reader.GetString(3),
             Status: reader.GetString(4),
-            Sha256: reader.IsDBNull(5) ? null : reader.GetString(5));
+            Sha256: reader.IsDBNull(5) ? null : reader.GetString(5),
+            BytesCopied: reader.IsDBNull(6) ? null : reader.GetInt64(6));
     }
 
     /// <summary>
@@ -159,7 +161,8 @@ public sealed class TransferLedger : IDisposable
 
         using var command = _connection.CreateCommand();
         command.CommandText = """
-            SELECT source_path, source_size, source_modified, destination, status, sha256
+            SELECT source_path, source_size, source_modified, destination, status, sha256,
+                   bytes_copied
             FROM copy WHERE device_key = $device ORDER BY copy_id;
             """;
         command.Parameters.AddWithValue("$device", deviceKey);
@@ -175,7 +178,8 @@ public sealed class TransferLedger : IDisposable
                 SourceModified: reader.IsDBNull(2) ? null : reader.GetString(2),
                 Destination: reader.GetString(3),
                 Status: reader.GetString(4),
-                Sha256: reader.IsDBNull(5) ? null : reader.GetString(5));
+                Sha256: reader.IsDBNull(5) ? null : reader.GetString(5),
+                BytesCopied: reader.IsDBNull(6) ? null : reader.GetInt64(6));
         }
         return map;
     }

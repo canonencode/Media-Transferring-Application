@@ -459,4 +459,122 @@ public class TransferPlanTests
 
         Assert.Equal(@"D:\out\WhatsApp", Path.GetDirectoryName(free));
     }
+
+    // ---- What the adversarial pass found -----------------------------------
+
+    [Fact]
+    public void TheWordAll_IsRecognisedWhateverItsCasing()
+    {
+        // Every other token in a selection is matched case-insensitively, and
+        // this one arrives having been through a shell, a JSON message and a
+        // join. "ALL" matching nothing made the copier print "Nothing to do"
+        // and the setup page report a comfortable fit, over a phone with
+        // nothing backed up.
+        var plan = TransferPlan.Build(AMixedPhone());
+
+        Assert.Equal(plan.Copies.Count, TransferPlan.ForSources(plan.Copies, "ALL").Count);
+        Assert.Equal(plan.Copies.Count, TransferPlan.ForSources(plan.Copies, " All ").Count);
+    }
+
+    [Fact]
+    public void TwoObjectsSharingOnePath_GetTheSameNamesWhateverOrderTheyArriveIn()
+    {
+        // MTP keys on object handles, not names, so one folder can hold two
+        // different objects called the same thing - and the scan deliberately
+        // keeps both rows rather than collapsing them. Their path and their name
+        // both tie, and the query that reads them back has no ORDER BY, so a
+        // stable sort left the pair in whatever order SQLite happened to return.
+        // Which one got "a.jpg" and which got "a (2).jpg" could then change
+        // between runs, and a resumed transfer would copy both again under each
+        // other's names.
+        var rows = new[]
+        {
+            new TransferItem("o:11", "/P/DCIM/Camera/a.jpg", "a.jpg", 1000, "2026-09-22T10:00:00"),
+            new TransferItem("o:22", "/P/DCIM/Camera/a.jpg", "a.jpg", 2000, "2026-09-22T11:00:00"),
+        };
+
+        var forwards = TransferPlan.Build(rows);
+        var backwards = TransferPlan.Build(rows.Reverse());
+
+        Assert.Equal(
+            forwards.Copies.Single(c => c.Item.ObjectId == "o:11").RelativePath,
+            backwards.Copies.Single(c => c.Item.ObjectId == "o:11").RelativePath);
+        Assert.Equal(
+            forwards.Copies.Single(c => c.Item.ObjectId == "o:22").RelativePath,
+            backwards.Copies.Single(c => c.Item.ObjectId == "o:22").RelativePath);
+    }
+
+    [Fact]
+    public void APlannedName_LeavesRoomForTheCopiersPartSuffix()
+    {
+        // NTFS refuses any path component over 255 characters and the long-path
+        // prefix does not lift it. Every file is staged as "<name>.part" first,
+        // so a 255-character name the destination would accept became a
+        // 260-character one it refused - and the failure was deterministic, so
+        // the file failed identically on every retry and could never be backed
+        // up at all. Android's download manager truncates titles to exactly this
+        // boundary, so such names are ordinary.
+        string name = new string('a', 251) + ".jpg";   // 255 characters
+
+        var plan = TransferPlan.Build([Item("/P/DCIM/Camera/x", name: name)]);
+        string planned = plan.Copies[0].RelativePath["Kamera/".Length..];
+
+        Assert.True(planned.Length + ".part".Length <= 255,
+            $"planned name is {planned.Length} characters; staged as .part it is " +
+            $"{planned.Length + 5}, which NTFS refuses");
+    }
+
+    [Fact]
+    public void ATruncatedName_KeepsItsExtension()
+    {
+        // The extension is how the file opens. Cutting it off to fit would
+        // hand back something Windows treats as a document of no kind.
+        string name = new string('b', 300) + ".jpg";
+
+        var plan = TransferPlan.Build([Item("/P/DCIM/Camera/x", name: name)]);
+
+        Assert.EndsWith(".jpg", plan.Copies[0].RelativePath, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ATruncatedName_NeverSplitsASurrogatePair()
+    {
+        // Cutting between the halves of a pair produces an unpaired surrogate,
+        // which is the exact thing SafeFileName exists to repair - so the fix
+        // for one problem must not manufacture the other.
+        string name = new string('c', 248) + "\U0001F600\U0001F600\U0001F600.jpg";
+
+        string safe = TransferPlan.SafeFileName(name);
+
+        Assert.DoesNotContain(safe, char.IsSurrogate(safe[^1]) ? "_" : "\uFFFF");
+        for (int i = 0; i < safe.Length; i++)
+        {
+            if (char.IsHighSurrogate(safe[i]))
+            {
+                Assert.True(i + 1 < safe.Length && char.IsLowSurrogate(safe[i + 1]),
+                    "a high surrogate was left without its pair");
+                i++;
+            }
+            else
+            {
+                Assert.False(char.IsLowSurrogate(safe[i]), "a lone low surrogate survived");
+            }
+        }
+    }
+
+    [Fact]
+    public void TruncationDoesNotCostAFile_WhenTwoLongNamesCollide()
+    {
+        // Cutting names to fit creates collisions that were not there before.
+        // Unique has to absorb them, or two photographs share one destination.
+        string a = new string('d', 260) + "-first.jpg";
+        string b = new string('d', 260) + "-second.jpg";
+
+        var plan = TransferPlan.Build([
+            Item("/P/DCIM/Camera/1", name: a),
+            Item("/P/DCIM/Camera/2", name: b),
+        ]);
+
+        Assert.Equal(2, Paths(plan).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+    }
 }

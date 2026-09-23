@@ -397,4 +397,90 @@ public class TransferLedgerTests
         Assert.Equal(CopyAction.Skip,
             CopyDecision.Decide(Done(size: 0), 0, "2026-09-22", destinationExists: true, destinationSize: 0));
     }
+
+    // ---- What the adversarial pass found -----------------------------------
+
+    [Fact]
+    public void ThePhonesCopyChanged_ButNothingIsOnDiskToKeep_MeansAPlainCopy()
+    {
+        // CopyAsNewVersion exists to keep BOTH files. With nothing at the
+        // destination there is no first version to keep, and answering it anyway
+        // sent the file through a naming helper that starts at " (2)" and never
+        // offers the bare name - so an empty destination folder ended up holding
+        // a photograph called "a (2).jpg" and no "a.jpg", while the ledger
+        // recorded a destination the deterministic plan would never choose
+        // again. That divergence is what made the next run measure the wrong
+        // file entirely.
+        Assert.Equal(CopyAction.Copy,
+            CopyDecision.Decide(Done(), 2000, "2026-09-30", destinationExists: false, destinationSize: 0));
+    }
+
+    [Fact]
+    public void AFileWhoseSizeTheDeviceNeverReported_IsNotRecopiedOverItselfEveryRun()
+    {
+        // The scan stores NULL when WPD does not supply a size, and both readers
+        // turn that NULL into 0. So the ledger remembers source_size = 0 for a
+        // file that is really 3 MB, and checking a real file against 0 says
+        // "wrong length" on every run forever - each one deleting the verified
+        // copy before pulling it down again, with the arrival-length check
+        // switched off for exactly these files.
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        long id = ledger.Begin(Device, Item("/P/a.jpg", size: 0), @"D:\a.jpg");
+        ledger.Complete(id, 3_000_000, "hash");   // what actually arrived, and was verified
+
+        var previous = ledger.Latest(Device, "/P/a.jpg");
+
+        Assert.Equal(CopyAction.Skip,
+            CopyDecision.Decide(previous, 0, "2026-09-22",
+                destinationExists: true, destinationSize: 3_000_000));
+    }
+
+    [Fact]
+    public void WhatArrivedIsRememberedAlongsideWhatTheDeviceClaimed()
+    {
+        // The decision reads BytesCopied, so it has to survive both ways of
+        // asking. A null here would silently fall back to the device's figure.
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        long id = ledger.Begin(Device, Item("/P/a.jpg", size: 0), @"D:\a.jpg");
+        ledger.Complete(id, 3_000_000, "hash");
+
+        Assert.Equal(3_000_000, ledger.Latest(Device, "/P/a.jpg")!.BytesCopied);
+        Assert.Equal(3_000_000, ledger.AllFor(Device)["/P/a.jpg"].BytesCopied);
+    }
+
+    [Fact]
+    public void AnUnfinishedRowCarriesNoArrivedCount()
+    {
+        // Nothing has arrived yet, and a zero here would read as "a zero-byte
+        // file arrived" to anything comparing lengths.
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        ledger.Begin(Device, Item("/P/a.jpg"), @"D:\a.jpg");
+
+        Assert.Null(ledger.Latest(Device, "/P/a.jpg")!.BytesCopied);
+    }
+
+    [Fact]
+    public void AShortCopyIsStillTheWrongLength()
+    {
+        // The fix must not blunt the check it replaced: a file that arrived
+        // truncated and was later found at the wrong length must still be
+        // copied again.
+        using var db = new TempDatabase();
+        using var ledger = new TransferLedger(db.Path);
+
+        long id = ledger.Begin(Device, Item("/P/a.jpg", size: 1000), @"D:\a.jpg");
+        ledger.Complete(id, 1000, "hash");
+
+        var previous = ledger.Latest(Device, "/P/a.jpg");
+
+        Assert.Equal(CopyAction.Copy,
+            CopyDecision.Decide(previous, 1000, "2026-09-22",
+                destinationExists: true, destinationSize: 640));
+    }
 }
